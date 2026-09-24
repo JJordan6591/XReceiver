@@ -1,0 +1,44 @@
+# Visual Studio
+.vs/
+
+# Build output (solution and project intermediates)
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+[Bb]in/
+[Oo]bj/
+
+# C++/WinRT and XAML generated output
+Generated Files/
+
+# Packaged app output
+AppPackages/
+*.appx
+*.appxbundle
+*.appxsym
+*.appxupload
+*.msix
+*.msixbundle
+
+# NuGet restore. packages.config stays tracked because it is not inside this directory.
+packages/
+
+# Machine-local settings, certificates, and private keys
+*.user
+*.pfx
+*.cer
+
+# Temporary host self-test executables and logs, if created inside the tree
+selftest.exe
+selftest.pdb
+selftest.obj
+selftest.ilk
+dbg.exe
+dbg.pdb
+dbg.obj
+dbg.ilk
+*.selftest.log
+rx_selftest/

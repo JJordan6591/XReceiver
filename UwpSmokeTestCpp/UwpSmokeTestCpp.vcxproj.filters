@@ -1,0 +1,201 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ApplicationDefinition Include="App.xaml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Page Include="MainPage.xaml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Midl Include="App.idl" />
+    <Midl Include="MainPage.idl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="pch.cpp" />
+    <ClCompile Include="App.cpp" />
+    <ClCompile Include="MainPage.cpp" />
+    <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
+    <ClCompile Include="RtpPacket.cpp">
+      <Filter>Rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="JitterBuffer.cpp">
+      <Filter>Rtp</Filter>
+    </ClCompile>
+    <ClCompile Include="H264Bitstream.cpp">
+      <Filter>Video</Filter>
+    </ClCompile>
+    <ClCompile Include="H264Depacketizer.cpp">
+      <Filter>Video</Filter>
+    </ClCompile>
+    <ClCompile Include="H264KeyframeGate.cpp">
+      <Filter>Video</Filter>
+    </ClCompile>
+    <ClCompile Include="VideoTimeline.cpp">
+      <Filter>Video</Filter>
+    </ClCompile>
+    <ClCompile Include="VideoDeliveryCore.cpp">
+      <Filter>Video</Filter>
+    </ClCompile>
+    <ClCompile Include="VideoReceiver.cpp">
+      <Filter>Video</Filter>
+    </ClCompile>
+    <ClCompile Include="VideoPresenter.cpp">
+      <Filter>Video</Filter>
+    </ClCompile>
+    <ClCompile Include="AudioReceiver.cpp">
+      <Filter>Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="AudioPresenter.cpp">
+      <Filter>Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="SincResampler.cpp">
+      <Filter>Audio</Filter>
+    </ClCompile>
+    <ClCompile Include="MediaClock.cpp">
+      <Filter>Session</Filter>
+    </ClCompile>
+    <ClCompile Include="ReceiverSession.cpp">
+      <Filter>Session</Filter>
+    </ClCompile>
+    <ClCompile Include="ReceiverSettings.cpp">
+      <Filter>Session</Filter>
+    </ClCompile>
+    <ClCompile Include="SelfTest.cpp">
+      <Filter>Test</Filter>
+    </ClCompile>
+    <ClCompile Include="PocSpikes.cpp">
+      <Filter>Test</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="pch.h" />
+    <ClInclude Include="RtpPacket.h">
+      <Filter>Rtp</Filter>
+    </ClInclude>
+    <ClInclude Include="RtpSequence.h">
+      <Filter>Rtp</Filter>
+    </ClInclude>
+    <ClInclude Include="JitterBuffer.h">
+      <Filter>Rtp</Filter>
+    </ClInclude>
+    <ClInclude Include="H264AccessUnit.h">
+      <Filter>Video</Filter>
+    </ClInclude>
+    <ClInclude Include="H264Bitstream.h">
+      <Filter>Video</Filter>
+    </ClInclude>
+    <ClInclude Include="H264Depacketizer.h">
+      <Filter>Video</Filter>
+    </ClInclude>
+    <ClInclude Include="H264KeyframeGate.h">
+      <Filter>Video</Filter>
+    </ClInclude>
+    <ClInclude Include="VideoTimeline.h">
+      <Filter>Video</Filter>
+    </ClInclude>
+    <ClInclude Include="FrameDelivery.h">
+      <Filter>Video</Filter>
+    </ClInclude>
+    <ClInclude Include="VideoDeliveryCore.h">
+      <Filter>Video</Filter>
+    </ClInclude>
+    <ClInclude Include="VideoReceiver.h">
+      <Filter>Video</Filter>
+    </ClInclude>
+    <ClInclude Include="VideoPresenter.h">
+      <Filter>Video</Filter>
+    </ClInclude>
+    <ClInclude Include="L16Convert.h">
+      <Filter>Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="PcmRingBuffer.h">
+      <Filter>Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="AudioReceiver.h">
+      <Filter>Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="AudioPresenter.h">
+      <Filter>Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="SincResampler.h">
+      <Filter>Audio</Filter>
+    </ClInclude>
+    <ClInclude Include="BoundedQueue.h">
+      <Filter>Session</Filter>
+    </ClInclude>
+    <ClInclude Include="DebugLog.h">
+      <Filter>Session</Filter>
+    </ClInclude>
+    <ClInclude Include="MediaClock.h">
+      <Filter>Session</Filter>
+    </ClInclude>
+    <ClInclude Include="ReceiverSession.h">
+      <Filter>Session</Filter>
+    </ClInclude>
+    <ClInclude Include="ReceiverSettings.h">
+      <Filter>Session</Filter>
+    </ClInclude>
+    <ClInclude Include="ReceiverStats.h">
+      <Filter>Session</Filter>
+    </ClInclude>
+    <ClInclude Include="SelfTest.h">
+      <Filter>Test</Filter>
+    </ClInclude>
+    <ClInclude Include="PocSpikes.h">
+      <Filter>Test</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="Assets\Wide310x150Logo.scale-200.png">
+      <Filter>Assets</Filter>
+    </Image>
+    <Image Include="Assets\StoreLogo.png">
+      <Filter>Assets</Filter>
+    </Image>
+    <Image Include="Assets\Square150x150Logo.scale-200.png">
+      <Filter>Assets</Filter>
+    </Image>
+    <Image Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png">
+      <Filter>Assets</Filter>
+    </Image>
+    <Image Include="Assets\Square44x44Logo.scale-200.png">
+      <Filter>Assets</Filter>
+    </Image>
+    <Image Include="Assets\SplashScreen.scale-200.png">
+      <Filter>Assets</Filter>
+    </Image>
+    <Image Include="Assets\LockScreenLogo.scale-200.png">
+      <Filter>Assets</Filter>
+    </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <AppxManifest Include="Package.appxmanifest" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Assets">
+      <UniqueIdentifier>{e48dc53e-40b1-40cb-970a-f89935452892}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Rtp">
+      <UniqueIdentifier>{3b6f1c2a-8d4e-4f7a-9c1b-2e5d7a0f4c11}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Video">
+      <UniqueIdentifier>{7a2c9e41-5b3d-4e8f-a6c2-1d9b4f3e8a22}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Audio">
+      <UniqueIdentifier>{c4e8a1b3-2f6d-4a9c-8e1f-5b7d3c2a9e33}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Session">
+      <UniqueIdentifier>{9d1f4b6e-7c2a-4e3b-b5d8-6a4c1e9f2b44}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Test">
+      <UniqueIdentifier>{e2b7d5c9-4a1f-4c6e-9b3a-8f2e6d1c5a55}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="PropertySheet.props" />
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="readme.txt" />
+  </ItemGroup>
+</Project>

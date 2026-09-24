@@ -1,0 +1,1789 @@
+#include "pch.h"
+#include "SelfTest.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "AudioReceiver.h"
+#include "DebugLog.h"
+#include "H264Bitstream.h"
+#include "H264Depacketizer.h"
+#include "H264KeyframeGate.h"
+#include "JitterBuffer.h"
+#include "L16Convert.h"
+#include "MediaClock.h"
+#include "PcmRingBuffer.h"
+#include "RtpPacket.h"
+#include "RtpSequence.h"
+#include "SincResampler.h"
+#include "FrameDelivery.h"
+#include "VideoDeliveryCore.h"
+#include "VideoTimeline.h"
+
+namespace rx
+{
+    namespace
+    {
+        struct TestContext
+        {
+            int passed = 0;
+            int failed = 0;
+            std::wstring failures;
+
+            void Check(bool condition, wchar_t const* name)
+            {
+                if (condition)
+                {
+                    ++passed;
+                    return;
+                }
+                ++failed;
+                Log(L"SELFTEST FAIL: %s", name);
+                if (failed <= 8)
+                {
+                    failures += L"\n  FAIL: ";
+                    failures += name;
+                }
+            }
+        };
+
+        using Bytes = std::vector<uint8_t>;
+
+        Bytes MakeRtp(uint16_t sequence, uint32_t timestamp, uint32_t ssrc, bool marker, Bytes const& payload,
+                      uint8_t payloadType = 96)
+        {
+            Bytes packet(12);
+            packet[0] = 0x80;
+            packet[1] = static_cast<uint8_t>((marker ? 0x80 : 0) | payloadType);
+            packet[2] = static_cast<uint8_t>(sequence >> 8);
+            packet[3] = static_cast<uint8_t>(sequence);
+            packet[4] = static_cast<uint8_t>(timestamp >> 24);
+            packet[5] = static_cast<uint8_t>(timestamp >> 16);
+            packet[6] = static_cast<uint8_t>(timestamp >> 8);
+            packet[7] = static_cast<uint8_t>(timestamp);
+            packet[8] = static_cast<uint8_t>(ssrc >> 24);
+            packet[9] = static_cast<uint8_t>(ssrc >> 16);
+            packet[10] = static_cast<uint8_t>(ssrc >> 8);
+            packet[11] = static_cast<uint8_t>(ssrc);
+            packet.insert(packet.end(), payload.begin(), payload.end());
+            return packet;
+        }
+
+        class BitWriter
+        {
+        public:
+            void Bits(uint32_t value, int count)
+            {
+                for (int i = count - 1; i >= 0; --i)
+                {
+                    Bit((value >> i) & 1u);
+                }
+            }
+            void Bit(uint32_t bit)
+            {
+                if (m_bit == 0)
+                {
+                    m_bytes.push_back(0);
+                }
+                if (bit)
+                {
+                    m_bytes.back() |= static_cast<uint8_t>(0x80 >> m_bit);
+                }
+                m_bit = (m_bit + 1) % 8;
+            }
+            void Ue(uint32_t value)
+            {
+                uint64_t const v = uint64_t{ value } + 1;
+                int bits = 0;
+                while ((v >> bits) > 1)
+                {
+                    ++bits;
+                }
+                Bits(0, bits);
+                Bits(static_cast<uint32_t>(v), bits + 1);
+            }
+            Bytes Finish()
+            {
+                Bit(1); // rbsp_stop_one_bit
+                while (m_bit != 0)
+                {
+                    Bit(0);
+                }
+                return m_bytes;
+            }
+
+        private:
+            Bytes m_bytes;
+            int m_bit = 0;
+        };
+
+        Bytes AddEmulationPrevention(Bytes const& rbsp)
+        {
+            Bytes out;
+            int zeros = 0;
+            for (uint8_t b : rbsp)
+            {
+                if (zeros >= 2 && b <= 3)
+                {
+                    out.push_back(3);
+                    zeros = 0;
+                }
+                out.push_back(b);
+                zeros = (b == 0) ? zeros + 1 : 0;
+            }
+            return out;
+        }
+
+        Bytes MakeSps(bool highProfile, uint32_t widthMbs, uint32_t heightMbs, uint32_t cropBottom, bool withRestriction)
+        {
+            BitWriter w;
+            w.Bits(highProfile ? 100 : 66, 8);
+            w.Bits(0, 8);
+            w.Bits(40, 8);
+            w.Ue(0); // sps id
+            if (highProfile)
+            {
+                w.Ue(1); // chroma_format_idc
+                w.Ue(0);
+                w.Ue(0);
+                w.Bit(0);
+                w.Bit(0); // no scaling matrix
+            }
+            w.Ue(0); // log2_max_frame_num_minus4
+            w.Ue(0); // poc type 0
+            w.Ue(0); // log2_max_poc_lsb_minus4
+            w.Ue(1); // max_num_ref_frames
+            w.Bit(0);
+            w.Ue(widthMbs - 1);
+            w.Ue(heightMbs - 1);
+            w.Bit(1); // frame_mbs_only
+            w.Bit(1); // direct_8x8
+            if (cropBottom > 0)
+            {
+                w.Bit(1);
+                w.Ue(0);
+                w.Ue(0);
+                w.Ue(0);
+                w.Ue(cropBottom);
+            }
+            else
+            {
+                w.Bit(0);
+            }
+            if (withRestriction)
+            {
+                w.Bit(1); // vui present
+                w.Bit(0); // aspect
+                w.Bit(0); // overscan
+                w.Bit(0); // video signal
+                w.Bit(0); // chroma loc
+                w.Bit(1); // timing info
+                w.Bits(1, 32);
+                w.Bits(120, 32);
+                w.Bit(1);
+                w.Bit(0); // nal hrd
+                w.Bit(0); // vcl hrd
+                w.Bit(0); // pic struct
+                w.Bit(1); // bitstream restriction
+                w.Bit(1);
+                w.Ue(2);
+                w.Ue(1);
+                w.Ue(16);
+                w.Ue(16);
+                w.Ue(0); // num_reorder_frames
+                w.Ue(1); // max_dec_frame_buffering
+            }
+            else
+            {
+                w.Bit(0);
+            }
+            Bytes nal{ 0x67 };
+            Bytes const body = AddEmulationPrevention(w.Finish());
+            nal.insert(nal.end(), body.begin(), body.end());
+            return nal;
+        }
+
+        Bytes const kPps{ 0x68, 0xCE, 0x3C, 0x80 };
+        Bytes const kIdrSlice{ 0x65, 0x88, 0x84, 0x00, 0x33, 0xFF };
+        Bytes const kPSlice{ 0x41, 0x9A, 0x02, 0x04 };
+        Bytes const kNonRefSlice{ 0x01, 0x9E, 0x02, 0x04 };
+
+        struct CollectingSink : JitterBuffer::Sink
+        {
+            std::vector<int64_t> delivered;
+            int64_t lost = 0;
+            void OnOrderedPacket(RtpPacketView const&, int64_t extSequence, Clock::time_point) override
+            {
+                delivered.push_back(extSequence);
+            }
+            void OnPacketsLost(int64_t count) override { lost += count; }
+        };
+
+        void TestRtpParser(TestContext& t)
+        {
+            RtpPacketView view;
+            Bytes basic = MakeRtp(0x1234, 0xAABBCCDD, 0x01020304, true, { 1, 2, 3 });
+            t.Check(ParseRtpPacket(basic.data(), basic.size(), view) == RtpParseResult::Ok, L"rtp basic parse");
+            t.Check(view.sequence == 0x1234 && view.timestamp == 0xAABBCCDD && view.ssrc == 0x01020304, L"rtp header fields");
+            t.Check(view.marker && view.payloadType == 96 && view.payloadSize == 3 && view.payload[0] == 1, L"rtp marker/pt/payload");
+
+            Bytes shortPacket(11, 0x80);
+            t.Check(ParseRtpPacket(shortPacket.data(), shortPacket.size(), view) == RtpParseResult::TooShort, L"rtp too short");
+
+            Bytes badVersion = basic;
+            badVersion[0] = 0x40;
+            t.Check(ParseRtpPacket(badVersion.data(), badVersion.size(), view) == RtpParseResult::BadVersion, L"rtp bad version");
+
+            Bytes padded = MakeRtp(1, 0, 1, false, { 9, 9, 0, 0, 3 });
+            padded[0] |= 0x20;
+            t.Check(ParseRtpPacket(padded.data(), padded.size(), view) == RtpParseResult::Ok && view.payloadSize == 2, L"rtp padding");
+
+            Bytes badPadding = MakeRtp(1, 0, 1, false, { 9, 9, 7 });
+            badPadding[0] |= 0x20;
+            t.Check(ParseRtpPacket(badPadding.data(), badPadding.size(), view) == RtpParseResult::BadPadding, L"rtp bad padding");
+
+            Bytes csrc = MakeRtp(1, 0, 1, false, { 0, 0, 0, 5, 0xEE });
+            csrc[0] |= 0x01;
+            t.Check(ParseRtpPacket(csrc.data(), csrc.size(), view) == RtpParseResult::Ok && view.payloadSize == 1 && view.payload[0] == 0xEE, L"rtp csrc skip");
+
+            Bytes badCsrc = MakeRtp(1, 0, 1, false, { 0 });
+            badCsrc[0] |= 0x0F;
+            t.Check(ParseRtpPacket(badCsrc.data(), badCsrc.size(), view) == RtpParseResult::BadCsrc, L"rtp bad csrc");
+
+            Bytes extension = MakeRtp(1, 0, 1, false, { 0xBE, 0xDE, 0, 1, 1, 2, 3, 4, 0x77 });
+            extension[0] |= 0x10;
+            t.Check(ParseRtpPacket(extension.data(), extension.size(), view) == RtpParseResult::Ok && view.payloadSize == 1 && view.payload[0] == 0x77, L"rtp extension skip");
+
+            Bytes badExtension = MakeRtp(1, 0, 1, false, { 0xBE, 0xDE, 0, 9, 1 });
+            badExtension[0] |= 0x10;
+            t.Check(ParseRtpPacket(badExtension.data(), badExtension.size(), view) == RtpParseResult::BadExtension, L"rtp bad extension");
+
+            Bytes empty = MakeRtp(1, 0, 1, false, {});
+            t.Check(ParseRtpPacket(empty.data(), empty.size(), view) == RtpParseResult::EmptyPayload, L"rtp empty payload");
+        }
+
+        void TestUnwrappers(TestContext& t)
+        {
+            SequenceUnwrapper seq;
+            int64_t const a = seq.Unwrap(65534);
+            int64_t const b = seq.Unwrap(65535);
+            int64_t const c = seq.Unwrap(0);
+            int64_t const d = seq.Unwrap(1);
+            t.Check(b == a + 1 && c == a + 2 && d == a + 3, L"sequence wrap 65535->0");
+            t.Check(seq.Unwrap(65535) == b, L"sequence reordered across wrap");
+
+            TimestampUnwrapper ts;
+            int64_t const t0 = ts.Unwrap(0xFFFFFF00u);
+            int64_t const t1 = ts.Unwrap(0x00000100u);
+            t.Check(t1 - t0 == 0x200, L"timestamp wrap");
+        }
+
+        void TestJitterBuffer(TestContext& t)
+        {
+            JitterBuffer::Config config;
+            config.reorderWindow = 16;
+            config.capacity = 32;
+            config.timeout = std::chrono::milliseconds(10);
+            JitterBuffer jitter(config);
+            CollectingSink sink;
+            SequenceUnwrapper seq;
+            auto now = Clock::now();
+
+            auto insert = [&](uint16_t s, Clock::time_point at)
+            {
+                Bytes packet = MakeRtp(s, 0, 1, false, { 1 });
+                RtpPacketView view;
+                ParseRtpPacket(packet.data(), packet.size(), view);
+                return jitter.Insert(packet.data(), packet.size(), view, seq.Unwrap(s), at, sink);
+            };
+
+            insert(65533, now);
+            insert(65534, now);
+            auto const buffered = insert(0, now);         // 65535 missing
+            auto const filled = insert(65535, now);
+            t.Check(buffered == JitterBuffer::InsertResult::Buffered, L"jitter buffers ahead-of-sequence packet");
+            t.Check(filled == JitterBuffer::InsertResult::DeliveredReordered, L"jitter reports reordered fill");
+            t.Check(sink.delivered.size() == 4 && sink.delivered[2] + 1 == sink.delivered[3], L"jitter delivers in order across wrap");
+            t.Check(insert(65535, now) == JitterBuffer::InsertResult::Duplicate, L"jitter duplicate");
+
+            insert(3, now);                                 // 1 and 2 missing
+            jitter.Poll(now + std::chrono::milliseconds(5), sink);
+            t.Check(sink.lost == 0, L"jitter holds gap within timeout");
+            jitter.Poll(now + std::chrono::milliseconds(11), sink);
+            t.Check(sink.lost == 2 && sink.delivered.back() == seq.Unwrap(3), L"jitter releases gap after timeout");
+            t.Check(insert(1, now) == JitterBuffer::InsertResult::Late, L"jitter late packet after skip");
+
+            size_t const before = sink.delivered.size();
+            t.Check(insert(200, now) == JitterBuffer::InsertResult::Resynced && sink.delivered.size() == before + 1, L"jitter resync beyond window");
+        }
+
+        void TestTracker(TestContext& t)
+        {
+            RtpStreamTracker tracker;
+            auto const now = Clock::now();
+            auto const takeover = std::chrono::seconds(1);
+            RtpPacketView p;
+            p.ssrc = 0xA;
+            p.sequence = 100;
+            t.Check(tracker.Check(p, now, takeover) == TrackDecision::NewStream, L"tracker locks first stream");
+            p.sequence = 101;
+            t.Check(tracker.Check(p, now, takeover) == TrackDecision::Accept, L"tracker accepts locked stream");
+
+            RtpPacketView other = p;
+            other.ssrc = 0xB;
+            other.sequence = 5000;
+            t.Check(tracker.Check(other, now, takeover) == TrackDecision::Ignore, L"tracker ignores single foreign packet");
+            other.sequence = 5001;
+            t.Check(tracker.Check(other, now, takeover) == TrackDecision::NewStream, L"tracker switches after probation");
+
+            RtpPacketView jump = other;
+            jump.sequence = 40000;
+            t.Check(tracker.Check(jump, now, takeover) == TrackDecision::Ignore, L"tracker ignores one sequence jump");
+            jump.sequence = 40001;
+            t.Check(tracker.Check(jump, now, takeover) == TrackDecision::NewStream, L"tracker restarts on confirmed jump");
+
+            RtpPacketView late = jump;
+            late.ssrc = 0xC;
+            t.Check(tracker.Check(late, now + std::chrono::seconds(2), takeover) == TrackDecision::NewStream, L"tracker takeover after silence");
+        }
+
+        Bytes StapA(std::vector<Bytes> const& nals)
+        {
+            Bytes stap{ 0x78 };
+            for (Bytes const& nal : nals)
+            {
+                stap.push_back(static_cast<uint8_t>(nal.size() >> 8));
+                stap.push_back(static_cast<uint8_t>(nal.size()));
+                stap.insert(stap.end(), nal.begin(), nal.end());
+            }
+            return stap;
+        }
+
+        Bytes FuA(uint8_t nalHeader, bool start, bool end, Bytes const& fragment)
+        {
+            Bytes packet{ static_cast<uint8_t>((nalHeader & 0xE0) | h264::kNalFuA),
+                          static_cast<uint8_t>((start ? 0x80 : 0) | (end ? 0x40 : 0) | (nalHeader & 0x1F)) };
+            packet.insert(packet.end(), fragment.begin(), fragment.end());
+            return packet;
+        }
+
+        // Splits a NAL into FU-A packets carrying at most chunk payload bytes each.
+        std::vector<Bytes> Fragment(Bytes const& nal, size_t chunk)
+        {
+            std::vector<Bytes> packets;
+            for (size_t offset = 1; offset < nal.size(); offset += chunk)
+            {
+                size_t const n = std::min(chunk, nal.size() - offset);
+                Bytes const piece(nal.begin() + static_cast<ptrdiff_t>(offset), nal.begin() + static_cast<ptrdiff_t>(offset + n));
+                packets.push_back(FuA(nal[0], offset == 1, offset + n == nal.size(), piece));
+            }
+            return packets;
+        }
+
+        Bytes const kIdrSliceLong{ 0x65, 0x88, 0x84, 0x00, 0x33, 0xFF, 0x10, 0x20 };
+        Bytes const kPSliceLong{ 0x41, 0x9A, 0x02, 0x04, 0x11, 0x22 };
+        Bytes const kNonRefSliceLong{ 0x01, 0x9E, 0x02, 0x04, 0x11, 0x22 };
+        Bytes const kPSliceNotMb0{ 0x41, 0x40, 0x02, 0x04 };   // first_mb_in_slice == 1
+
+        class DepackHarness
+        {
+        public:
+            DepackHarness() : depack([this](AccessUnitPtr au) { units.push_back(std::move(au)); }) {}
+            DepackHarness(DepackHarness const&) = delete;
+            DepackHarness& operator=(DepackHarness const&) = delete;
+
+            void Send(int64_t sequence, int64_t timestamp, bool marker, Bytes const& payload, uint32_t ssrc = 0x1234)
+            {
+                H264Depacketizer::PacketInfo info;
+                info.ssrc = ssrc;
+                info.extSequence = sequence;
+                info.extTimestamp = timestamp;
+                info.marker = marker;
+                info.arrival = Clock::now();
+                depack.OnPacket(payload.data(), payload.size(), info);
+            }
+
+            // Sends a NAL as FU-A fragments starting at sequence, skipping the given indices.
+            int64_t SendFragmented(int64_t sequence, int64_t timestamp, Bytes const& nal, size_t chunk,
+                                   std::vector<size_t> const& skip = {}, bool marker = true)
+            {
+                auto const packets = Fragment(nal, chunk);
+                for (size_t i = 0; i < packets.size(); ++i)
+                {
+                    bool const skipped = std::find(skip.begin(), skip.end(), i) != skip.end();
+                    if (!skipped)
+                    {
+                        Send(sequence, timestamp, marker && i + 1 == packets.size(), packets[i]);
+                    }
+                    ++sequence;
+                }
+                return sequence;
+            }
+
+            // Pattern of emitted AUs: 'C' complete, 'I' incomplete.
+            std::wstring Pattern() const
+            {
+                std::wstring pattern;
+                for (auto const& au : units)
+                {
+                    pattern += au->corrupt ? L'I' : L'C';
+                }
+                return pattern;
+            }
+
+            bool IncompleteCarryNoData() const
+            {
+                for (auto const& au : units)
+                {
+                    if (au->corrupt && (!au->data.empty() || !au->nals.empty() || au->hasSlice))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            std::vector<AccessUnitPtr> units;
+            H264Depacketizer depack;
+        };
+
+        Bytes NalBytes(AccessUnit const& au, size_t index)
+        {
+            NalRef const& ref = au.nals[index];
+            return Bytes(au.data.begin() + ref.offset, au.data.begin() + ref.offset + ref.size);
+        }
+
+        void TestDepacketizer(TestContext& t)
+        {
+            Bytes const sps = MakeSps(false, 120, 68, 4, false);
+            bool noData = true;
+
+            {
+                // STAP-A (AUD, SPS, PPS) then an IDR in three FU-A fragments.
+                DepackHarness h;
+                h.Send(100, 1000, false, StapA({ { 0x09, 0xF0 }, sps, kPps }));
+                h.SendFragmented(101, 1000, kIdrSliceLong, 3);
+                t.Check(h.Pattern() == L"C", L"depack complete IDR on marker");
+                if (h.units.size() == 1)
+                {
+                    AccessUnit const& au = *h.units[0];
+                    t.Check(au.isIdr && au.hasSps && au.hasPps && au.hasSlice && au.nals.size() == 3, L"depack IDR flags, AUD stripped");
+                    t.Check(au.nals.size() == 3 && NalBytes(au, 2) == kIdrSliceLong, L"depack FU-A rebuilds original IDR NAL");
+                    t.Check(au.firstSequence == 100 && au.lastSequence == 103 && au.ssrc == 0x1234, L"depack AU sequence span and SSRC");
+                }
+                noData = noData && h.IncompleteCarryNoData();
+            }
+            {
+                // NRI and type are rebuilt from the FU indicator and FU header.
+                DepackHarness h;
+                h.SendFragmented(1, 3000, kPSliceLong, 2);
+                h.SendFragmented(4, 6000, kNonRefSliceLong, 2);
+                t.Check(h.Pattern() == L"CC" && NalBytes(*h.units[0], 0) == kPSliceLong && NalBytes(*h.units[1], 0) == kNonRefSliceLong,
+                        L"depack FU-A rebuilds NRI 2 and NRI 0 headers");
+                t.Check(h.units.size() == 2 && !h.units[0]->allNonRef && h.units[1]->allNonRef, L"depack reference flags");
+            }
+            {
+                // FU-A start fragment lost.
+                DepackHarness h;
+                h.Send(1, 1000, true, kPSlice);
+                h.SendFragmented(2, 2500, kIdrSliceLong, 3, { 0 });
+                t.Check(h.Pattern() == L"CI" && !h.units[1]->lossConfined, L"depack FU-A loss at start");
+                t.Check(h.depack.GetCounters().sequenceGaps == 1 && h.depack.GetCounters().missingPackets == 1, L"depack counts gap");
+                noData = noData && h.IncompleteCarryNoData();
+            }
+            {
+                // FU-A middle fragment lost.
+                DepackHarness h;
+                h.SendFragmented(10, 1000, kIdrSliceLong, 2, { 1 });
+                t.Check(h.Pattern() == L"I" && h.units[0]->lossConfined && h.units[0]->sawSlice && !h.units[0]->allNonRef,
+                        L"depack FU-A loss in middle");
+                noData = noData && h.IncompleteCarryNoData();
+            }
+            {
+                // FU-A end fragment (the marker packet) lost: both neighbours are suspect.
+                DepackHarness h;
+                int64_t const next = h.SendFragmented(20, 1000, kIdrSliceLong, 3, { 2 });
+                h.Send(next, 2500, true, kPSlice);
+                h.Send(next + 1, 4000, true, kPSlice);
+                t.Check(h.Pattern() == L"IIC", L"depack FU-A loss at end");
+                noData = noData && h.IncompleteCarryNoData();
+            }
+            {
+                // Marker on a middle fragment: FU never ended.
+                DepackHarness h;
+                auto const packets = Fragment(kIdrSliceLong, 3);
+                h.Send(30, 1000, false, packets[0]);
+                h.Send(31, 1000, true, packets[1]);
+                t.Check(h.Pattern() == L"I" && h.depack.GetCounters().fuaErrors == 1, L"depack marker without FU-A end");
+            }
+            {
+                // Start and end bits both set, fragment type change, forbidden bit, invalid type.
+                DepackHarness h;
+                h.Send(40, 1000, true, FuA(0x65, true, true, { 0x88 }));
+                auto const packets = Fragment(kIdrSliceLong, 3);
+                h.Send(41, 2000, false, packets[0]);
+                Bytes retyped = packets[2];
+                retyped[1] = static_cast<uint8_t>((retyped[1] & 0xE0) | h264::kNalSliceNonIdr);
+                h.Send(42, 2000, true, retyped);
+                Bytes forbidden = FuA(0x65, true, false, { 0x88 });
+                forbidden[0] |= 0x80;
+                h.Send(43, 3000, true, forbidden);
+                h.Send(44, 4000, true, FuA(0x7C, true, false, { 0x88 }));   // FU-A carrying type 28
+                t.Check(h.Pattern() == L"IIII", L"depack rejects malformed FU-A headers");
+                noData = noData && h.IncompleteCarryNoData();
+            }
+            {
+                // Timestamp change before the marker, with no sequence gap.
+                DepackHarness h;
+                h.Send(50, 4000, false, kPSlice);
+                h.Send(51, 5500, true, kPSlice);
+                t.Check(h.Pattern() == L"IC" && h.depack.GetCounters().missingMarker == 1, L"depack timestamp change before marker");
+                noData = noData && h.IncompleteCarryNoData();
+            }
+            {
+                // Marker packet lost: the next AU may have lost its head too.
+                DepackHarness h;
+                h.Send(60, 6000, false, kPSlice);
+                h.Send(62, 7500, true, kPSlice);
+                h.Send(63, 9000, true, kPSlice);
+                t.Check(h.Pattern() == L"IIC" && !h.units[0]->lossConfined && !h.units[1]->lossConfined, L"depack marker loss");
+            }
+            {
+                // SSRC change inside an AU.
+                DepackHarness h;
+                h.Send(70, 1000, false, kPSlice, 0xA);
+                h.Send(71, 1000, true, kPSlice, 0xB);
+                t.Check(h.units.size() == 2 && h.units[0]->corrupt && h.units[0]->ssrc == 0xA && h.units[1]->ssrc == 0xB,
+                        L"depack groups by SSRC");
+            }
+            {
+                // Duplicates and stale packets never reopen or extend an AU.
+                DepackHarness h;
+                auto const packets = Fragment(kIdrSliceLong, 3);
+                h.Send(80, 1000, false, packets[0]);
+                h.Send(80, 1000, false, packets[0]);
+                h.Send(81, 1000, false, packets[1]);
+                h.Send(82, 1000, true, packets[2]);
+                h.Send(81, 1000, false, packets[1]);
+                t.Check(h.Pattern() == L"C" && NalBytes(*h.units[0], 0) == kIdrSliceLong && h.depack.GetCounters().staleOrDuplicate == 2,
+                        L"depack ignores duplicate and stale packets");
+            }
+            {
+                // Malformed STAP-A: length overflow, nested FU-A type, header only.
+                DepackHarness h;
+                h.Send(90, 1000, true, Bytes{ 0x78, 0x00, 0x10, 0x67 });
+                h.Send(91, 2000, true, StapA({ { 0x7C, 0x85, 0x88 } }));
+                h.Send(92, 3000, true, Bytes{ 0x78 });
+                t.Check(h.Pattern() == L"III" && h.depack.GetCounters().stapaErrors == 3, L"depack rejects malformed STAP-A");
+                noData = noData && h.IncompleteCarryNoData();
+            }
+            {
+                // Unsupported packetization (FU-B) loses content.
+                DepackHarness h;
+                h.Send(100, 1000, true, Bytes{ 0x7D, 0x85, 0x88, 0x00, 0x00 });
+                t.Check(h.Pattern() == L"I" && h.depack.GetCounters().unsupportedNal == 1, L"depack unsupported NAL type is incomplete");
+            }
+            {
+                // Joining mid-picture after a reset: the first slice does not start at MB 0.
+                DepackHarness h;
+                h.Send(110, 1000, true, kPSliceNotMb0);
+                h.Send(111, 2500, true, kPSliceNotMb0);
+                t.Check(h.Pattern() == L"IC", L"depack rejects first AU that joins mid-picture");
+                h.depack.Reset();
+                h.units.clear();
+                h.Send(500, 9000, true, kPSlice);
+                t.Check(h.Pattern() == L"C", L"depack accepts first AU starting at MB 0");
+            }
+            {
+                // Loss confined to a non-reference picture.
+                DepackHarness h;
+                h.SendFragmented(120, 1000, kNonRefSliceLong, 2, { 1 });
+                t.Check(h.Pattern() == L"I" && h.units[0]->lossConfined && h.units[0]->sawSlice && h.units[0]->allNonRef,
+                        L"depack non-reference loss is confined");
+            }
+
+            t.Check(noData, L"depack incomplete AUs never carry data");
+        }
+
+        // Jitter buffer + unwrappers + depacketizer, as wired in VideoReceiver.
+        class PipelineHarness : private JitterBuffer::Sink
+        {
+        public:
+            explicit PipelineHarness(JitterBuffer::Config const& config) : jitter(config) {}
+
+            JitterBuffer::InsertResult Feed(uint16_t sequence, uint32_t timestamp, bool marker, Bytes const& payload,
+                                            Clock::time_point now)
+            {
+                Bytes const packet = MakeRtp(sequence, timestamp, 0x77, marker, payload);
+                RtpPacketView view;
+                ParseRtpPacket(packet.data(), packet.size(), view);
+                return jitter.Insert(packet.data(), packet.size(), view, sequences.Unwrap(view.sequence), now, *this);
+            }
+
+            void Poll(Clock::time_point now) { jitter.Poll(now, *this); }
+
+            DepackHarness out;
+            JitterBuffer jitter;
+            SequenceUnwrapper sequences;
+            TimestampUnwrapper timestamps;
+            int64_t lost = 0;
+
+        private:
+            void OnOrderedPacket(RtpPacketView const& packet, int64_t extSequence, Clock::time_point arrival) override
+            {
+                H264Depacketizer::PacketInfo info;
+                info.ssrc = packet.ssrc;
+                info.extSequence = extSequence;
+                info.extTimestamp = timestamps.Unwrap(packet.timestamp);
+                info.marker = packet.marker;
+                info.arrival = arrival;
+                out.depack.OnPacket(packet.payload, packet.payloadSize, info);
+            }
+            void OnPacketsLost(int64_t count) override { lost += count; }
+        };
+
+        void TestVideoPipeline(TestContext& t)
+        {
+            JitterBuffer::Config config;
+            config.reorderWindow = 64;
+            config.capacity = 128;
+            config.timeout = std::chrono::milliseconds(10);
+            auto const now = Clock::now();
+            auto const frags = Fragment(kIdrSliceLong, 3);
+
+            {
+                // Sequence and timestamp wrap inside and across access units.
+                PipelineHarness p(config);
+                uint32_t const ts0 = 0xFFFFFA00u;
+                p.Feed(65533, ts0, false, frags[0], now);
+                p.Feed(65534, ts0, false, frags[1], now);
+                p.Feed(65535, ts0, true, frags[2], now);
+                p.Feed(0, ts0 + 1500u, true, kPSlice, now);
+                p.Feed(1, ts0 + 3000u, true, kPSlice, now);
+                auto const& units = p.out.units;
+                t.Check(p.out.Pattern() == L"CCC" && p.lost == 0 && p.out.depack.GetCounters().sequenceGaps == 0,
+                        L"pipeline sequence wrap without loss");
+                t.Check(units.size() == 3 && units[2]->rtpTimestamp - units[1]->rtpTimestamp == 1500 &&
+                        units[1]->rtpTimestamp - units[0]->rtpTimestamp == 1500, L"pipeline timestamp wrap");
+            }
+            {
+                // A fragment lost across the sequence wrap.
+                PipelineHarness p(config);
+                p.Feed(65534, 1000, false, frags[0], now);
+                p.Feed(0, 1000, true, frags[2], now);
+                p.Poll(now + std::chrono::milliseconds(11));
+                t.Check(p.out.Pattern() == L"I" && p.lost == 1, L"pipeline loss across sequence wrap");
+            }
+            {
+                // Out-of-order fragments are reordered into a complete AU.
+                PipelineHarness p(config);
+                p.Feed(100, 1000, false, frags[0], now);
+                p.Feed(102, 1000, true, frags[2], now);
+                auto const fill = p.Feed(101, 1000, false, frags[1], now);
+                t.Check(fill == JitterBuffer::InsertResult::DeliveredReordered && p.out.Pattern() == L"C" &&
+                        NalBytes(*p.out.units[0], 0) == kIdrSliceLong, L"pipeline reorders out-of-order fragments");
+            }
+            {
+                // Duplicate fragments are discarded.
+                PipelineHarness p(config);
+                p.Feed(200, 1000, false, frags[0], now);
+                auto const dup = p.Feed(200, 1000, false, frags[0], now);
+                p.Feed(201, 1000, false, frags[1], now);
+                p.Feed(202, 1000, true, frags[2], now);
+                t.Check(dup == JitterBuffer::InsertResult::Duplicate && p.out.Pattern() == L"C" &&
+                        NalBytes(*p.out.units[0], 0) == kIdrSliceLong, L"pipeline drops duplicate fragment");
+            }
+            {
+                // A fragment arriving after the reorder timeout is late; its AU stays discarded.
+                PipelineHarness p(config);
+                p.Feed(300, 1000, false, frags[0], now);
+                p.Feed(302, 1000, true, frags[2], now);
+                p.Poll(now + std::chrono::milliseconds(11));
+                auto const late = p.Feed(301, 1000, false, frags[1], now + std::chrono::milliseconds(12));
+                p.Feed(303, 2500, true, kPSlice, now + std::chrono::milliseconds(13));
+                t.Check(late == JitterBuffer::InsertResult::Late && p.out.Pattern() == L"IC", L"pipeline late packet after timeout");
+                t.Check(p.out.IncompleteCarryNoData(), L"pipeline incomplete AUs carry no data");
+            }
+        }
+
+        void TestSps(TestContext& t)
+        {
+            SpsInfo info;
+            Bytes const baseline = MakeSps(false, 120, 68, 4, false);
+            t.Check(ParseSps(baseline.data(), baseline.size(), info) && info.width == 1920 && info.height == 1080, L"sps baseline 1080p crop");
+
+            Bytes const high = MakeSps(true, 80, 45, 0, true);
+            bool const ok = ParseSps(high.data(), high.size(), info);
+            t.Check(ok && info.profileIdc == 100 && info.width == 1280 && info.height == 720, L"sps high 720p");
+            t.Check(ok && info.bitstreamRestriction && info.maxDecFrameBuffering == 1 && info.numReorderFrames == 0, L"sps vui bitstream restriction");
+            t.Check(ok && info.timingInfoPresent && info.timeScale == 120, L"sps vui timing");
+
+            Bytes truncated(baseline.begin(), baseline.begin() + 4);
+            t.Check(!ParseSps(truncated.data(), truncated.size(), info), L"sps rejects truncated");
+
+            Bytes const hevcVps{ 0x40, 0x01, 0x0C };
+            t.Check(LooksLikeHevcPayload(hevcVps.data(), hevcVps.size()), L"hevc heuristic VPS");
+            t.Check(!LooksLikeHevcPayload(kIdrSlice.data(), kIdrSlice.size()) && !LooksLikeHevcPayload(kPSlice.data(), kPSlice.size()), L"hevc heuristic ignores h264");
+        }
+
+        AccessUnitPtr MakeAu(std::vector<Bytes> const& nals, bool corrupt = false)
+        {
+            auto au = std::make_unique<AccessUnit>();
+            for (Bytes const& nal : nals)
+            {
+                au->data.insert(au->data.end(), std::begin(h264::kStartCode), std::end(h264::kStartCode));
+                NalRef ref;
+                ref.offset = static_cast<uint32_t>(au->data.size());
+                ref.size = static_cast<uint32_t>(nal.size());
+                ref.type = nal[0] & 0x1F;
+                au->data.insert(au->data.end(), nal.begin(), nal.end());
+                au->nals.push_back(ref);
+                uint8_t const nri = (nal[0] >> 5) & 3;
+                if (ref.type >= 1 && ref.type <= 5)
+                {
+                    au->hasSlice = true;
+                    au->allNonRef = au->allNonRef && nri == 0;
+                    au->isIdr = au->isIdr || ref.type == 5;
+                }
+                au->hasSps = au->hasSps || ref.type == 7;
+                au->hasPps = au->hasPps || ref.type == 8;
+            }
+            au->sawSlice = au->hasSlice;
+            if (corrupt)
+            {
+                // Mirrors the depacketizer: damaged AUs keep classification but no data.
+                au->corrupt = true;
+                au->data.clear();
+                au->nals.clear();
+                au->hasSlice = false;
+                au->hasSps = false;
+                au->hasPps = false;
+            }
+            return au;
+        }
+
+        using Decision = H264KeyframeGate::Decision;
+
+        void TestGate(TestContext& t)
+        {
+            H264KeyframeGate gate;
+            H264KeyframeGate::Config config;
+            config.policy = LossPolicy::Strict;
+            gate.Configure(config);
+            gate.Reset();
+            Bytes const sps = MakeSps(false, 120, 68, 4, false);
+
+            t.Check(gate.Process(*MakeAu({ kPSlice })).decision == Decision::DropAwaitingIdr, L"gate drops P before first IDR");
+            t.Check(gate.Process(*MakeAu({ kIdrSlice })).decision == Decision::DropAwaitingIdr, L"gate needs parameter sets for IDR");
+
+            auto idr = MakeAu({ sps, kPps, kIdrSlice });
+            auto result = gate.Process(*idr);
+            t.Check(result.decision == Decision::Submit && result.resynced && idr->discontinuity && !gate.IsWaiting(),
+                    L"gate submits IDR with SPS/PPS");
+            t.Check(gate.Process(*MakeAu({ kPSlice })).decision == Decision::Submit, L"gate submits P while decoding");
+
+            auto nonRef = MakeAu({ kNonRefSlice }, true);
+            t.Check(gate.Process(*nonRef).decision == Decision::DropNonRef && !gate.IsWaiting(), L"gate drops confined non-ref loss without waiting");
+
+            auto straddling = MakeAu({ kNonRefSlice }, true);
+            straddling->lossConfined = false;
+            result = gate.Process(*straddling);
+            t.Check(result.decision == Decision::DropIncomplete && result.referenceLost && gate.IsWaiting(),
+                    L"gate strict awaits IDR when loss may include another picture");
+
+            gate.EnterWaiting();
+            auto resume = MakeAu({ kIdrSlice });
+            t.Check(gate.Process(*resume).decision == Decision::Submit, L"gate resumes on IDR");
+
+            // An AU whose only slice was an aborted FU-A has no complete slice; it must still count
+            // as a lost reference.
+            auto noSurvivingSlice = std::make_unique<AccessUnit>();
+            noSurvivingSlice->corrupt = true;
+            noSurvivingSlice->sawSlice = true;
+            noSurvivingSlice->allNonRef = false;
+            result = gate.Process(*noSurvivingSlice);
+            t.Check(result.decision == Decision::DropIncomplete && gate.IsWaiting(), L"gate awaits IDR after damaged AU with no complete slice");
+
+            auto nothingSeen = std::make_unique<AccessUnit>();
+            nothingSeen->corrupt = true;
+            gate.EnterWaiting();
+            gate.Process(*MakeAu({ kIdrSlice }));
+            t.Check(gate.Process(*nothingSeen).decision == Decision::DropIncomplete && gate.IsWaiting(),
+                    L"gate awaits IDR after damaged AU with unknown content");
+
+            bool allDropped = true;
+            for (int i = 0; i < 600; ++i)
+            {
+                allDropped = allDropped && gate.Process(*MakeAu({ kPSlice })).decision == Decision::DropAwaitingIdr;
+            }
+            t.Check(allDropped && gate.IsWaiting(), L"gate never resumes on non-IDR pictures");
+
+            t.Check(gate.Process(*MakeAu({ kIdrSlice }, true)).decision == Decision::DropIncomplete && gate.IsWaiting(),
+                    L"gate rejects damaged IDR");
+
+            auto idrNoParams = MakeAu({ kIdrSlice });
+            auto injected = gate.Process(*idrNoParams);
+            bool const startsWithSps = idrNoParams->data.size() > 5 && idrNoParams->data[4] == 0x67;
+            t.Check(injected.decision == Decision::Submit && injected.resynced && idrNoParams->hasSps && idrNoParams->hasPps &&
+                    idrNoParams->nals.size() == 3 && idrNoParams->nals[0].type == 7 && idrNoParams->nals[1].type == 8 && startsWithSps,
+                    L"gate prepends cached SPS/PPS to IDR");
+            t.Check(gate.Process(*MakeAu({ kPSlice })).decision == Decision::Submit, L"gate decodes after IDR recovery");
+
+            // Parameter sets delivered in their own AU are cached for a later bare IDR.
+            H264KeyframeGate fresh;
+            fresh.Configure(config);
+            t.Check(fresh.Process(*MakeAu({ sps, kPps })).decision == Decision::DropNoSlice && fresh.HasParameterSets(),
+                    L"gate caches SPS/PPS from a slice-less AU");
+            t.Check(fresh.Process(*MakeAu({ kIdrSlice })).decision == Decision::Submit, L"gate submits bare IDR with cached SPS/PPS");
+            H264KeyframeGate damaged;
+            damaged.Configure(config);
+            t.Check(damaged.Process(*MakeAu({ sps, kPps }, true)).decision == Decision::DropIncomplete && !damaged.HasParameterSets(),
+                    L"gate ignores parameter sets from damaged AU");
+
+            Bytes const sps720 = MakeSps(false, 80, 45, 0, false);
+            t.Check(gate.Process(*MakeAu({ sps720, kPps, kPSlice })).decision == Decision::DropAwaitingIdr && gate.IsWaiting(),
+                    L"gate awaits IDR on format change without IDR");
+            auto resized = MakeAu({ sps720, kPps, kIdrSlice });
+            auto resizedResult = gate.Process(*resized);
+            t.Check(resizedResult.decision == Decision::Submit && !resizedResult.formatChanged && gate.Sps().width == 1280,
+                    L"gate resumes on IDR in new format");
+            Bytes const sps1080 = MakeSps(false, 120, 68, 4, false);
+            t.Check(gate.Process(*MakeAu({ sps1080, kPps, kIdrSlice })).formatChanged, L"gate detects format change");
+
+            // Tolerant: damaged pictures are dropped whole, complete ones keep decoding.
+            H264KeyframeGate tolerant;
+            H264KeyframeGate::Config tolerantConfig;
+            tolerantConfig.policy = LossPolicy::Tolerant;
+            tolerant.Configure(tolerantConfig);
+            tolerant.Process(*MakeAu({ sps, kPps, kIdrSlice }));
+            result = tolerant.Process(*MakeAu({ kPSlice }, true));
+            t.Check(result.decision == Decision::DropIncomplete && result.referenceLost && !tolerant.IsWaiting(),
+                    L"gate tolerant drops damaged picture without waiting");
+            t.Check(tolerant.Process(*MakeAu({ kPSlice })).decision == Decision::Submit, L"gate tolerant keeps decoding complete pictures");
+            tolerant.MarkUnprimed();
+            t.Check(tolerant.Process(*MakeAu({ kPSlice })).decision == Decision::DropAwaitingIdr, L"gate tolerant needs IDR on a new decoder");
+        }
+
+        // Depacketizer + gate end to end: loss on a reference picture, AwaitingIDR, recovery.
+        struct RecoveryRun
+        {
+            std::vector<Decision> decisions;
+            std::vector<AccessUnitPtr> submitted;
+            bool submittedOnlyComplete = true;
+        };
+
+        RecoveryRun RunRecovery(LossPolicy policy)
+        {
+            Bytes const sps = MakeSps(false, 120, 68, 4, false);
+            RecoveryRun run;
+            H264KeyframeGate gate;
+            H264KeyframeGate::Config config;
+            config.policy = policy;
+            gate.Configure(config);
+
+            DepackHarness h;
+            auto drain = [&]()
+            {
+                for (auto& au : h.units)
+                {
+                    auto const result = gate.Process(*au);
+                    run.decisions.push_back(result.decision);
+                    if (result.decision == Decision::Submit)
+                    {
+                        run.submittedOnlyComplete = run.submittedOnlyComplete && !au->corrupt && !au->data.empty() &&
+                            !au->nals.empty() && au->nals.front().offset == sizeof(h264::kStartCode);
+                        run.submitted.push_back(std::move(au));
+                    }
+                }
+                h.units.clear();
+            };
+
+            int64_t seq = 1000;
+            h.Send(seq++, 1000, false, StapA({ sps, kPps }));
+            seq = h.SendFragmented(seq, 1000, kIdrSliceLong, 3);     // IDR + SPS/PPS
+            h.Send(seq++, 2500, true, kPSlice);                      // P
+            seq = h.SendFragmented(seq, 4000, kPSliceLong, 2, { 1 }); // P, middle fragment lost
+            h.Send(seq++, 5500, true, kPSlice);                      // P referencing the lost picture
+            seq = h.SendFragmented(seq, 7000, kPSliceLong, 2);       // P
+            seq = h.SendFragmented(seq, 8500, kIdrSliceLong, 3);     // IDR without SPS/PPS
+            h.Send(seq++, 10000, true, kPSlice);                     // P
+            drain();
+            return run;
+        }
+
+        void TestVideoRecovery(TestContext& t)
+        {
+            RecoveryRun const strict = RunRecovery(LossPolicy::Strict);
+            std::vector<Decision> const strictExpected{
+                Decision::Submit, Decision::Submit, Decision::DropIncomplete, Decision::DropAwaitingIdr,
+                Decision::DropAwaitingIdr, Decision::Submit, Decision::Submit };
+            t.Check(strict.decisions == strictExpected, L"recovery strict: drop damaged P, await IDR, resume");
+            t.Check(strict.submittedOnlyComplete && strict.submitted.size() == 4, L"recovery strict submits only complete AUs");
+            if (strict.submitted.size() == 4)
+            {
+                AccessUnit const& recovered = *strict.submitted[2];
+                t.Check(recovered.isIdr && recovered.discontinuity && recovered.nals.size() == 3 &&
+                        recovered.nals[0].type == h264::kNalSps && recovered.nals[1].type == h264::kNalPps &&
+                        NalBytes(recovered, 2) == kIdrSliceLong, L"recovery strict IDR carries cached SPS/PPS");
+            }
+
+            RecoveryRun const tolerant = RunRecovery(LossPolicy::Tolerant);
+            std::vector<Decision> const tolerantExpected{
+                Decision::Submit, Decision::Submit, Decision::DropIncomplete, Decision::Submit,
+                Decision::Submit, Decision::Submit, Decision::Submit };
+            t.Check(tolerant.decisions == tolerantExpected, L"recovery tolerant drops only the damaged AU");
+            t.Check(tolerant.submittedOnlyComplete, L"recovery tolerant never submits incomplete AUs");
+        }
+
+        std::vector<VideoTimeline::Stamp> RunTimeline(VideoTimeline& timeline, int64_t start, std::vector<int64_t> const& steps)
+        {
+            // Frames arrive in real time with their RTP spacing.
+            std::vector<VideoTimeline::Stamp> stamps;
+            int64_t rtp = start;
+            stamps.push_back(timeline.Next(rtp, 0));
+            for (int64_t step : steps)
+            {
+                rtp += step;
+                stamps.push_back(timeline.Next(rtp, VideoTimeline::RtpToTicks(rtp - start)));
+            }
+            return stamps;
+        }
+
+        bool StrictlyIncreasing(std::vector<VideoTimeline::Stamp> const& stamps)
+        {
+            for (size_t i = 1; i < stamps.size(); ++i)
+            {
+                if (stamps[i].pts <= stamps[i - 1].pts)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // pts spacing and durations follow the RTP deltas exactly (within rounding).
+        bool FollowsRtp(std::vector<VideoTimeline::Stamp> const& stamps, std::vector<int64_t> const& steps, int64_t maxDuration)
+        {
+            int64_t cumulative = 0;
+            for (size_t i = 0; i < steps.size(); ++i)
+            {
+                int64_t const before = VideoTimeline::RtpToTicks(cumulative);
+                cumulative += steps[i];
+                int64_t const expected = VideoTimeline::RtpToTicks(cumulative) - before;
+                int64_t const delta = stamps[i + 1].pts - stamps[i].pts;
+                int64_t const expectedDuration = std::min(VideoTimeline::RtpToTicks(steps[i]), maxDuration);
+                if (delta != expected || std::llabs(stamps[i + 1].duration - expectedDuration) > 1)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        void TestVideoTimeline(TestContext& t)
+        {
+            VideoTimeline::Config const config;
+            struct Rate { int64_t step; int frames; wchar_t const* name; };
+            for (Rate const rate : { Rate{ 1500, 60, L"timeline 60 fps spacing" }, Rate{ 1800, 50, L"timeline 50 fps spacing" },
+                                     Rate{ 3000, 30, L"timeline 30 fps spacing" } })
+            {
+                VideoTimeline timeline;
+                timeline.Configure(config);
+                std::vector<int64_t> const steps(static_cast<size_t>(rate.frames), rate.step);
+                auto const stamps = RunTimeline(timeline, 123456, steps);
+                bool const oneSecond = stamps.back().pts - stamps.front().pts == VideoTimeline::kTicksPerSecond;
+                t.Check(oneSecond && FollowsRtp(stamps, steps, config.maxDurationTicks) && StrictlyIncreasing(stamps) &&
+                        timeline.Discontinuities() == 0, rate.name);
+            }
+
+            {
+                // Variable spacing: 60/50/30 fps mixed with a static-screen pause.
+                VideoTimeline timeline;
+                timeline.Configure(config);
+                std::vector<int64_t> const steps{ 1500, 1500, 1800, 1800, 3000, 1500, 45000, 1500, 3000, 1800 };
+                auto const stamps = RunTimeline(timeline, 0, steps);
+                t.Check(FollowsRtp(stamps, steps, config.maxDurationTicks) && StrictlyIncreasing(stamps) && timeline.Discontinuities() == 0,
+                        L"timeline variable RTP spacing");
+                t.Check(stamps[7].duration == config.maxDurationTicks && stamps[1].duration == 166667 && stamps[3].duration == 200000 &&
+                        stamps[5].duration == 333333, L"timeline durations from adjacent RTP deltas");
+                t.Check(stamps[0].duration == config.defaultDurationTicks && stamps[0].pts == 0, L"timeline first sample");
+            }
+
+            {
+                // 32-bit RTP timestamp wrap through the unwrapper.
+                VideoTimeline timeline;
+                timeline.Configure(config);
+                TimestampUnwrapper unwrap;
+                std::vector<VideoTimeline::Stamp> stamps;
+                uint32_t raw = 0xFFFFF000u;
+                for (int i = 0; i < 10; ++i)
+                {
+                    stamps.push_back(timeline.Next(unwrap.Unwrap(raw), VideoTimeline::RtpToTicks(int64_t{ i } * 1500)));
+                    raw += 1500u;
+                }
+                t.Check(StrictlyIncreasing(stamps) && stamps.back().pts - stamps.front().pts == VideoTimeline::RtpToTicks(9 * 1500) &&
+                        timeline.Discontinuities() == 0, L"timeline RTP timestamp wrap");
+            }
+
+            {
+                // Long run: no accumulated rounding drift.
+                VideoTimeline timeline;
+                timeline.Configure(config);
+                int64_t first = 0;
+                int64_t last = 0;
+                for (int64_t i = 0; i < 100000; ++i)
+                {
+                    int64_t const pts = timeline.Next(i * 1500, VideoTimeline::RtpToTicks(i * 1500)).pts;
+                    if (i == 0) first = pts;
+                    last = pts;
+                }
+                t.Check(last - first == 16'666'500'000 && timeline.Discontinuities() == 0, L"timeline has no drift over 100k frames");
+            }
+
+            {
+                // Epoch: the first sample gets the Starting position; RTP deltas follow from it.
+                VideoTimeline timeline;
+                timeline.Configure(config);
+                timeline.Reset(12'345'678);
+                auto const a = timeline.Next(4'000'000'000LL, 0);
+                auto const b = timeline.Next(4'000'001'500LL, 166667);
+                t.Check(a.pts == 12'345'678 && b.pts == 12'345'678 + 166667 && timeline.StartTicks() == 12'345'678,
+                        L"timeline maps first RTP timestamp to the start position");
+            }
+
+            {
+                // Repeated or backwards timestamps: new offset at lastPts + lastDuration.
+                VideoTimeline timeline;
+                timeline.Configure(config);
+                auto const a = timeline.Next(9000, 0);
+                auto const b = timeline.Next(9000, 166667);
+                auto const c = timeline.Next(10500, 333333);
+                auto const d = timeline.Next(6000, 500000);
+                t.Check(a.pts == 0 && b.discontinuity && b.pts == a.pts + a.duration && !c.discontinuity && c.pts == b.pts + 166667 &&
+                        d.discontinuity && d.pts == c.pts + c.duration && timeline.Discontinuities() == 2,
+                        L"timeline backwards RTP starts new offset at last pts + duration");
+            }
+
+            {
+                // A forward RTP jump far ahead of real arrival time is a discontinuity too.
+                VideoTimeline timeline;
+                timeline.Configure(config);
+                auto const a = timeline.Next(0, 0);
+                auto const b = timeline.Next(1500, 166667);
+                int64_t const jumped = 1500 + 10 * 90000;
+                auto const c = timeline.Next(jumped, 333333);
+                auto const d = timeline.Next(jumped + 1500, 500000);
+                t.Check(!a.discontinuity && !b.discontinuity && c.discontinuity && c.pts == b.pts + b.duration &&
+                        !d.discontinuity && d.pts == c.pts + 166667 && timeline.Discontinuities() == 1,
+                        L"timeline forward RTP jump starts new offset");
+            }
+
+            {
+                // A static-screen pause keeps its real RTP length in pts; only the duration is capped.
+                VideoTimeline timeline;
+                timeline.Configure(config);
+                std::vector<int64_t> const steps{ 1500, 1500, 5 * 90000, 1500 };
+                auto const stamps = RunTimeline(timeline, 777, steps);
+                t.Check(stamps[3].pts - stamps[2].pts == 50'000'000 && stamps[3].duration == config.maxDurationTicks &&
+                        stamps[4].pts - stamps[3].pts == 166667 && timeline.Discontinuities() == 0,
+                        L"timeline keeps pause length from RTP");
+            }
+
+            {
+                // Reset starts the next source at zero again.
+                VideoTimeline timeline;
+                timeline.Configure(config);
+                timeline.Next(123456, 0);
+                timeline.Next(125000, 166667);
+                timeline.Reset();
+                auto const first = timeline.Next(999999, 999999);
+                t.Check(first.pts == 0 && first.duration == config.defaultDurationTicks && timeline.Discontinuities() == 0,
+                        L"timeline reset restarts at zero");
+            }
+        }
+
+        // Access units for the delivery tests; reference frames unless nonRef.
+        AccessUnitPtr DeliveryAu(int64_t rtp, Clock::time_point complete, bool idr = false, bool nonRef = false)
+        {
+            auto au = std::make_unique<AccessUnit>();
+            au->rtpTimestamp = rtp;
+            au->completeTime = complete;
+            au->isIdr = idr;
+            au->hasSlice = true;
+            au->allNonRef = nonRef;
+            au->data.assign(16, static_cast<uint8_t>(rtp & 0xFF));
+            return au;
+        }
+
+        void TestFrameDelivery(TestContext& t)
+        {
+            using Delivery = FrameDelivery<int>;
+            auto const t0 = Clock::now();
+            size_t const unlimited = static_cast<size_t>(-1);
+
+            {
+                // Admission beyond a limit rejects the new frame and never touches queued ones.
+                Delivery d;
+                d.BeginSource(DeliveryAu(0, t0, true));
+                for (int i = 1; i < 4; ++i)
+                {
+                    t.Check(d.Admit(DeliveryAu(i * 1500, t0), 4, unlimited), L"delivery admits below the frame limit");
+                }
+                t.Check(!d.Admit(DeliveryAu(6000, t0), 4, unlimited) && d.QueueSize() == 4, L"delivery rejects at the frame limit");
+                t.Check(!d.Admit(DeliveryAu(6000, t0), 10, d.QueueBytes() + 8) && d.QueueSize() == 4, L"delivery rejects at the byte limit");
+                auto first = d.OnRequest();
+                t.Check(first && first->isIdr && first->rtpTimestamp == 0, L"delivery keeps the IDR first after rejections");
+            }
+
+            {
+                // Overlapping requests are kept and served oldest first; a later request never
+                // jumps ahead of them.
+                Delivery d;
+                d.BeginSource(DeliveryAu(0, t0, true));
+                (void)d.OnRequest();
+                t.Check(!d.OnRequest() && !d.Retain(1), L"delivery first retained request");
+                t.Check(d.Retain(2) && d.PendingCount() == 2, L"delivery flags overlapping request");
+                d.Admit(DeliveryAu(1500, t0), 10, unlimited);
+                d.Admit(DeliveryAu(3000, t0), 10, unlimited);
+                d.Admit(DeliveryAu(4500, t0), 10, unlimited);
+                t.Check(!d.OnRequest(), L"delivery does not bypass retained requests");
+                d.Retain(3);
+                auto served = d.Serve();
+                t.Check(served.size() == 3 && served[0].pending == 1 && served[1].pending == 2 && served[2].pending == 3 &&
+                        served[0].au->rtpTimestamp == 1500 && served[2].au->rtpTimestamp == 4500, L"delivery serves requests FIFO");
+            }
+
+            {
+                // Trimming and ageing remove only frames nothing references.
+                Delivery d;
+                d.BeginSource(DeliveryAu(0, t0, true));
+                (void)d.OnRequest();
+                d.Admit(DeliveryAu(1500, t0, false, true), 10, unlimited);
+                d.Admit(DeliveryAu(3000, t0, false, true), 10, unlimited);
+                d.Admit(DeliveryAu(4500, t0), 10, unlimited);
+                d.Admit(DeliveryAu(6000, t0, false, true), 10, unlimited);
+                t.Check(d.TrimNonReference(2) == 2 && d.QueueSize() == 2, L"delivery trims non-reference frames above soft depth");
+                t.Check(d.DropStaleNonReference(t0 + std::chrono::seconds(1), std::chrono::milliseconds(100)) == 0,
+                        L"delivery never ages out a reference frame at the front");
+                auto a = d.OnRequest();
+                t.Check(a && a->rtpTimestamp == 4500 && d.DropStaleNonReference(t0 + std::chrono::seconds(1), std::chrono::milliseconds(100)) == 1,
+                        L"delivery ages out stale non-reference frames");
+            }
+        }
+
+        // Stream access units the gate accepts: IDR with SPS/PPS, or a reference P slice.
+        AccessUnitPtr StreamAu(bool idr, int64_t rtp, Clock::time_point complete)
+        {
+            static Bytes const sps = MakeSps(false, 120, 68, 4, false);
+            AccessUnitPtr au = idr ? MakeAu({ sps, kPps, kIdrSlice }) : MakeAu({ kPSlice });
+            au->rtpTimestamp = rtp;
+            au->completeTime = complete;
+            au->firstPacketTime = complete;
+            return au;
+        }
+
+        // Drives VideoDeliveryCore the way MediaStreamSource does: at most one outstanding
+        // request, and a new one only after the previous request was satisfied.
+        struct MssSim
+        {
+            explicit MssSim(VideoDeliveryCore& c) : core(c) {}
+
+            void Absorb(VideoDeliveryCore::Output& out)
+            {
+                if (out.openSource)
+                {
+                    source = out.openSource->second;
+                    ++opened;
+                }
+                for (auto& completion : out.completions)
+                {
+                    if (outstanding && completion.requestSerial == outstandingSerial)
+                    {
+                        outstanding = false;
+                    }
+                    if (completion.sample)
+                    {
+                        samples.push_back(std::move(*completion.sample));
+                    }
+                    else
+                    {
+                        ++ended;
+                    }
+                }
+            }
+
+            void Push(AccessUnitPtr au, Clock::time_point now)
+            {
+                VideoDeliveryCore::Output out;
+                core.OnAccessUnit(std::move(au), now, out);
+                Absorb(out);
+            }
+
+            // Returns true when the request was satisfied immediately.
+            bool Request(Clock::time_point now)
+            {
+                if (outstanding)
+                {
+                    return false;
+                }
+                VideoDeliveryCore::Output out;
+                std::optional<VideoDeliveryCore::Sample> immediate;
+                uint64_t const serial = ++nextSerial;
+                auto const result = core.OnRequest(source, serial, now, immediate, out);
+                if (result == VideoDeliveryCore::RequestResult::Immediate)
+                {
+                    samples.push_back(std::move(*immediate));
+                }
+                else if (result == VideoDeliveryCore::RequestResult::Retained)
+                {
+                    outstanding = true;
+                    outstandingSerial = serial;
+                }
+                else
+                {
+                    ++stale;
+                }
+                Absorb(out);
+                return result == VideoDeliveryCore::RequestResult::Immediate;
+            }
+
+            void ProcessAll()
+            {
+                for (auto const& s : samples)
+                {
+                    core.OnSampleProcessed(s.sourceId, s.sampleSerial);
+                }
+            }
+
+            VideoDeliveryCore& core;
+            uint64_t source = 0;
+            uint64_t opened = 0;
+            uint64_t nextSerial = 0;
+            bool outstanding = false;
+            uint64_t outstandingSerial = 0;
+            uint64_t ended = 0;
+            uint64_t stale = 0;
+            std::vector<VideoDeliveryCore::Sample> samples;
+        };
+
+        // Every sample in RTP order at step spacing, pts exactly the RTP delta from the first.
+        bool ContiguousSamples(std::vector<VideoDeliveryCore::Sample> const& samples, int64_t firstRtp, int64_t step, int64_t epoch = 0)
+        {
+            for (size_t i = 0; i < samples.size(); ++i)
+            {
+                int64_t const rtp = firstRtp + static_cast<int64_t>(i) * step;
+                if (samples[i].au->rtpTimestamp != rtp || samples[i].pts != epoch + VideoTimeline::RtpToTicks(rtp - firstRtp) ||
+                    samples[i].sampleSerial != i + 1)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        Clock::time_point FrameTime(Clock::time_point t0, int64_t frame)
+        {
+            return t0 + std::chrono::microseconds(frame * 16667);
+        }
+
+        void TestVideoDeliveryCore(TestContext& t)
+        {
+            auto const t0 = Clock::now();
+            VideoDeliveryCore::Config const defaults;
+
+            {
+                // The Xbox trace that stopped after five samples: IDR + 4 frames pulled, then
+                // ~150 ms of decoder start-up with no requests while 60 fps frames arrive.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                int64_t frame = 0;
+                mss.Push(StreamAu(true, 0, FrameTime(t0, frame)), FrameTime(t0, frame));
+                core.OnStarting(mss.source, 0);
+                for (frame = 1; frame < 5; ++frame)
+                {
+                    mss.Push(StreamAu(false, frame * 1500, FrameTime(t0, frame)), FrameTime(t0, frame));
+                }
+                for (int i = 0; i < 5; ++i)
+                {
+                    mss.Request(FrameTime(t0, 5));
+                }
+                for (; frame < 14; ++frame)
+                {
+                    mss.Push(StreamAu(false, frame * 1500, FrameTime(t0, frame)), FrameTime(t0, frame));
+                }
+                t.Check(mss.samples.size() == 5 && core.QueueSize() == 9 && !core.Gate().IsWaiting() &&
+                        stats->Get(Stat::AccessUnitsDiscarded) == 0, L"core keeps frames through the start-up stall");
+                t.Check(mss.Request(FrameTime(t0, 14)), L"core satisfies the sixth request immediately");
+                while (mss.Request(FrameTime(t0, 14)))
+                {
+                }
+                t.Check(mss.samples.size() == 14 && ContiguousSamples(mss.samples, 0, 1500) && mss.outstanding &&
+                        stats->Get(Stat::PtsDiscontinuities) == 0, L"core delivers every frame after the stall in order");
+                mss.Push(StreamAu(false, 14 * 1500, FrameTime(t0, 14)), FrameTime(t0, 14));
+                t.Check(mss.samples.size() == 15 && !mss.outstanding, L"core serves the retained request with the next frame");
+            }
+
+            {
+                // 180 frames arrive while the source first ignores and then requests slowly,
+                // followed by normal demand.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                int64_t frame = 0;
+                mss.Push(StreamAu(true, 0, FrameTime(t0, 0)), FrameTime(t0, 0));
+                t.Check(mss.opened == 1 && core.CurrentPhase() == VideoDeliveryCore::Phase::Opening, L"core opens a source on the IDR");
+                for (frame = 1; frame < 30; ++frame)
+                {
+                    mss.Push(StreamAu(false, frame * 1500, FrameTime(t0, frame)), FrameTime(t0, frame));
+                }
+                t.Check(core.QueueSize() == 30 && mss.samples.empty() && stats->Get(Stat::DropStartupFull) == 0,
+                        L"core holds IDR and GOP before the first request");
+                core.OnStarting(mss.source, 0);
+                for (; frame < 180; ++frame)
+                {
+                    mss.Push(StreamAu(false, frame * 1500, FrameTime(t0, frame)), FrameTime(t0, frame));
+                    if (frame % 10 == 0)
+                    {
+                        mss.Request(FrameTime(t0, frame));
+                    }
+                }
+                bool const firstIsIdr = !mss.samples.empty() && mss.samples[0].keyframe && mss.samples[0].pts == 0 &&
+                                        mss.samples[0].au->hasSps && mss.samples[0].au->hasPps && mss.samples[0].discontinuity;
+                t.Check(firstIsIdr, L"core delivers the startup IDR with SPS/PPS first at pts 0");
+                t.Check(mss.samples.size() == 15 && core.QueueSize() == 165 && !core.Gate().IsWaiting() &&
+                        stats->Get(Stat::AccessUnitsDiscarded) == 0 && stats->Get(Stat::StartupPeakFrames) >= 165,
+                        L"core keeps 165 frames of start-up backlog without drops");
+                t.Check(core.CurrentPhase() == VideoDeliveryCore::Phase::Starting && core.Unprocessed() == 15,
+                        L"core stays in start-up until a sample is rendered");
+
+                core.OnSampleRendered(mss.source);
+                t.Check(core.CurrentPhase() == VideoDeliveryCore::Phase::Playing && core.Draining(), L"core drains the start-up backlog");
+                for (; frame < 480; ++frame)
+                {
+                    mss.Push(StreamAu(false, frame * 1500, FrameTime(t0, frame)), FrameTime(t0, frame));
+                    for (int r = 0; r < 3; ++r)
+                    {
+                        mss.Request(FrameTime(t0, frame));
+                    }
+                }
+                t.Check(mss.samples.size() == 480 && ContiguousSamples(mss.samples, 0, 1500) && !core.Draining() &&
+                        core.QueueSize() == 0, L"core submits all 480 frames in order after slow start-up");
+                t.Check(stats->Get(Stat::AccessUnitsDiscarded) == 0 && stats->Get(Stat::DropAwaitingIdr) == 0 &&
+                        stats->Get(Stat::IdrWaitsBackpressure) == 0 && stats->Get(Stat::PtsDiscontinuities) == 0,
+                        L"core start-up without drops, IDR waits or pts discontinuities");
+            }
+
+            {
+                // A bounded startup buffer: overflow rejects the newest pictures, keeps the IDR
+                // and its GOP, and (Strict) awaits a new IDR for what was skipped.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                VideoDeliveryCore::Config config = defaults;
+                config.startupCap = 20;
+                core.Configure(config);
+                MssSim mss(core);
+                mss.Push(StreamAu(true, 0, t0), t0);
+                for (int64_t frame = 1; frame < 30; ++frame)
+                {
+                    mss.Push(StreamAu(false, frame * 1500, FrameTime(t0, frame)), FrameTime(t0, frame));
+                }
+                t.Check(core.QueueSize() == 20 && stats->Get(Stat::DropStartupFull) == 1 && stats->Get(Stat::DropAwaitingIdr) == 9 &&
+                        stats->Get(Stat::IdrWaitsBackpressure) == 1 && stats->Get(Stat::IdrWaitsNetwork) == 0 && core.Gate().IsWaiting(),
+                        L"core startup overflow skips newest frames and awaits IDR");
+                while (mss.Request(FrameTime(t0, 30)))
+                {
+                }
+                t.Check(mss.samples.size() == 20 && mss.samples[0].keyframe && ContiguousSamples(mss.samples, 0, 1500),
+                        L"core startup overflow still delivers the IDR and its GOP");
+                mss.Push(StreamAu(true, 40 * 1500, FrameTime(t0, 40)), FrameTime(t0, 40));
+                mss.Push(StreamAu(false, 41 * 1500, FrameTime(t0, 41)), FrameTime(t0, 41));
+                mss.Request(FrameTime(t0, 41));
+                t.Check(mss.samples.size() == 22 && mss.samples[20].keyframe && !core.Gate().IsWaiting() && mss.opened == 1,
+                        L"core resumes on the next IDR without a new source");
+            }
+
+            {
+                // The start-up backlog drains down to exactly the playing cap and demand then
+                // matches supply one for one: the cap handover must never reject a frame.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                VideoDeliveryCore::Config config = defaults;
+                config.playingCap = 10;
+                core.Configure(config);
+                MssSim mss(core);
+                mss.Push(StreamAu(true, 0, t0), t0);
+                int64_t frame = 1;
+                for (; frame < 25; ++frame)
+                {
+                    mss.Push(StreamAu(false, frame * 1500, FrameTime(t0, frame)), FrameTime(t0, frame));
+                }
+                mss.Request(FrameTime(t0, frame));
+                core.OnSampleRendered(mss.source);
+                while (core.QueueSize() > 10)
+                {
+                    mss.Push(StreamAu(false, frame * 1500, FrameTime(t0, frame)), FrameTime(t0, frame));
+                    mss.Request(FrameTime(t0, frame));
+                    mss.Request(FrameTime(t0, frame));
+                    ++frame;
+                }
+                for (int i = 0; i < 100; ++i, ++frame)
+                {
+                    mss.Push(StreamAu(false, frame * 1500, FrameTime(t0, frame)), FrameTime(t0, frame));
+                    mss.Request(FrameTime(t0, frame));
+                }
+                while (mss.Request(FrameTime(t0, frame)))
+                {
+                }
+                t.Check(mss.samples.size() == static_cast<size_t>(frame) && ContiguousSamples(mss.samples, 0, 1500) &&
+                        stats->Get(Stat::AccessUnitsDiscarded) == 0 && !core.Gate().IsWaiting(),
+                        L"core backlog at the playing cap never rejects a frame");
+            }
+
+            {
+                // Damaged network input and back-pressure are counted separately.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(StreamAu(true, 0, t0), t0);
+                mss.Request(t0);
+                auto damaged = MakeAu({ kPSlice }, true);
+                damaged->rtpTimestamp = 1500;
+                mss.Push(std::move(damaged), FrameTime(t0, 1));
+                t.Check(stats->Get(Stat::IdrWaitsNetwork) == 1 && stats->Get(Stat::IdrWaitsBackpressure) == 0 && core.Gate().IsWaiting(),
+                        L"core counts network damage as a network IDR wait");
+            }
+
+            {
+                // Admission capacity is released by the pull: with the queue at the playing cap
+                // a request frees a slot and the next frame is admitted; without it the frame is
+                // rejected as back-pressure.
+                VideoDeliveryCore::Config config = defaults;
+                config.playingCap = 4;
+                config.startupCap = 4;
+                for (bool pull : { true, false })
+                {
+                    auto stats = std::make_shared<ReceiverStats>();
+                    VideoDeliveryCore core(stats);
+                    core.Configure(config);
+                    MssSim mss(core);
+                    mss.Push(StreamAu(true, 0, t0), t0);
+                    mss.Request(t0);
+                    core.OnSampleRendered(mss.source);
+                    for (int64_t frame = 1; frame <= 4; ++frame)
+                    {
+                        mss.Push(StreamAu(false, frame * 1500, FrameTime(t0, frame)), FrameTime(t0, frame));
+                    }
+                    if (pull)
+                    {
+                        mss.Request(FrameTime(t0, 5));
+                    }
+                    mss.Push(StreamAu(false, 5 * 1500, FrameTime(t0, 5)), FrameTime(t0, 5));
+                    if (pull)
+                    {
+                        t.Check(core.QueueSize() == 4 && stats->Get(Stat::DropQueueFull) == 0 && !core.Gate().IsWaiting(),
+                                L"core pull releases admission capacity");
+                    }
+                    else
+                    {
+                        t.Check(core.QueueSize() == 4 && stats->Get(Stat::DropQueueFull) == 1 && stats->Get(Stat::IdrWaitsBackpressure) == 1,
+                                L"core full queue without pull rejects as back-pressure");
+                    }
+                }
+            }
+
+            {
+                // Processed accounting: each submitted sample is released exactly once.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(StreamAu(true, 0, t0), t0);
+                for (int64_t frame = 1; frame < 5; ++frame)
+                {
+                    mss.Push(StreamAu(false, frame * 1500, t0), t0);
+                }
+                for (int i = 0; i < 5; ++i)
+                {
+                    mss.Request(t0);
+                }
+                t.Check(core.Unprocessed() == 5 && stats->Get(Stat::SamplesInFlight) == 5, L"core counts five unprocessed samples");
+                bool const released = core.OnSampleProcessed(mss.source, 1) && core.OnSampleProcessed(mss.source, 3);
+                bool const repeated = core.OnSampleProcessed(mss.source, 3);
+                bool const unknown = core.OnSampleProcessed(mss.source, 99) || core.OnSampleProcessed(mss.source + 7, 2);
+                t.Check(released && !repeated && !unknown && core.Unprocessed() == 3, L"core Processed releases once, ignores repeats");
+                mss.ProcessAll();
+                t.Check(core.Unprocessed() == 0 && stats->Get(Stat::SamplesInFlight) == 0 && stats->Get(Stat::SamplesProcessed) == 5,
+                        L"core Processed returns accounting to zero");
+            }
+
+            {
+                // Epoch from Starting; stale requests end; source end releases retained requests.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(StreamAu(true, 900000, t0), t0);
+                core.OnStarting(mss.source, 5'000'000);
+                mss.Push(StreamAu(false, 901500, FrameTime(t0, 1)), FrameTime(t0, 1));
+                mss.Request(FrameTime(t0, 1));
+                mss.Request(FrameTime(t0, 1));
+                core.OnStarting(mss.source, 0);
+                mss.Push(StreamAu(false, 903000, FrameTime(t0, 2)), FrameTime(t0, 2));
+                mss.Request(FrameTime(t0, 2));
+                t.Check(mss.samples.size() == 3 && ContiguousSamples(mss.samples, 900000, 1500, 5'000'000) && core.EpochTicks() == 5'000'000,
+                        L"core epoch is the Starting position for the IDR's RTP timestamp");
+                mss.Request(FrameTime(t0, 3));
+                t.Check(mss.outstanding && core.PendingCount() == 1, L"core retains a request on an empty queue");
+                VideoDeliveryCore::Output out;
+                core.RequestNewSource(out);
+                mss.Absorb(out);
+                t.Check(mss.ended == 1 && !mss.outstanding && core.PendingCount() == 0, L"core ends retained request only when the source ends");
+                mss.Request(FrameTime(t0, 3));
+                t.Check(mss.stale == 1, L"core reports requests for a replaced source as stale");
+                mss.Push(StreamAu(false, 904500, FrameTime(t0, 3)), FrameTime(t0, 3));
+                t.Check(mss.opened == 1 && core.Gate().IsWaiting(), L"core needs an IDR for the next source");
+                mss.Push(StreamAu(true, 906000, FrameTime(t0, 4)), FrameTime(t0, 4));
+                mss.Request(FrameTime(t0, 4));
+                t.Check(mss.opened == 2 && mss.samples.size() == 4 && mss.samples[3].pts == 0 && mss.samples[3].sampleSerial == 1,
+                        L"core new source generation restarts the epoch at zero");
+            }
+        }
+
+        void TestVideoIntegration(TestContext& t)
+        {
+            // RTP packets through the jitter buffer, depacketizer, gate, delivery and timeline:
+            // one IDR followed by 3000 P-frames, with a slow-starting consumer. Every frame must
+            // be submitted in order without a second IDR.
+            JitterBuffer::Config jitterConfig;
+            jitterConfig.reorderWindow = 64;
+            jitterConfig.capacity = 128;
+            jitterConfig.timeout = std::chrono::milliseconds(10);
+            PipelineHarness p(jitterConfig);
+
+            auto stats = std::make_shared<ReceiverStats>();
+            VideoDeliveryCore core(stats);
+            core.Configure(VideoDeliveryCore::Config{});
+            MssSim mss(core);
+
+            Bytes const sps = MakeSps(false, 120, 68, 4, false);
+            auto const t0 = Clock::now();
+            uint16_t sequence = 65000;
+            uint32_t const ts0 = 0xFFFF0000u;
+            int64_t const frames = 3001;
+            bool noEarlyDeadlock = true;
+
+            for (int64_t frame = 0; frame < frames; ++frame)
+            {
+                auto const now = FrameTime(t0, frame);
+                uint32_t const ts = ts0 + static_cast<uint32_t>(frame * 1500);
+                if (frame == 0)
+                {
+                    p.Feed(sequence++, ts, false, sps, now);
+                    p.Feed(sequence++, ts, false, kPps, now);
+                    p.Feed(sequence++, ts, true, kIdrSlice, now);
+                }
+                else
+                {
+                    p.Feed(sequence++, ts, true, kPSlice, now);
+                }
+                for (auto& au : p.out.units)
+                {
+                    mss.Push(std::move(au), now);
+                }
+                p.out.units.clear();
+
+                if (frame == 20)
+                {
+                    core.OnStarting(mss.source, 0);
+                }
+                if (frame >= 20 && frame < 170 && frame % 8 == 0)
+                {
+                    mss.Request(now);
+                }
+                if (frame == 170)
+                {
+                    noEarlyDeadlock = mss.samples.size() > 5;
+                    core.OnSampleRendered(mss.source);
+                }
+                if (frame >= 170)
+                {
+                    for (int r = 0; r < 2; ++r)
+                    {
+                        mss.Request(now);
+                    }
+                }
+            }
+            while (mss.Request(FrameTime(t0, frames)))
+            {
+            }
+            mss.ProcessAll();
+
+            int64_t const firstRtp = mss.samples.empty() ? 0 : mss.samples[0].au->rtpTimestamp;
+            size_t idrs = 0;
+            for (auto const& s : mss.samples)
+            {
+                idrs += s.keyframe ? 1 : 0;
+            }
+            t.Check(noEarlyDeadlock && p.lost == 0 && p.out.depack.GetCounters().completeAccessUnits == static_cast<uint64_t>(frames),
+                    L"integration receives 3001 complete access units");
+            t.Check(mss.samples.size() == static_cast<size_t>(frames) && idrs == 1 && mss.samples[0].keyframe && mss.samples[0].pts == 0,
+                    L"integration submits all frames after one IDR");
+            t.Check(ContiguousSamples(mss.samples, firstRtp, 1500) && stats->Get(Stat::PtsDiscontinuities) == 0,
+                    L"integration pts follow RTP across the timestamp wrap");
+            t.Check(stats->Get(Stat::AccessUnitsDiscarded) == 0 && stats->Get(Stat::DropAwaitingIdr) == 0 && !core.Gate().IsWaiting() &&
+                    mss.opened == 1 && mss.ended == 0, L"integration needs no second IDR or source");
+            t.Check(core.Unprocessed() == 0 && stats->Get(Stat::SamplesProcessed) == frames, L"integration accounting returns to zero");
+        }
+
+        void TestAudio(TestContext& t)
+        {
+            uint8_t const minusOne[2] = { 0x80, 0x00 };
+            uint8_t const maxPositive[2] = { 0x7F, 0xFF };
+            uint8_t const smallest[2] = { 0x00, 0x01 };
+            uint8_t const minusSmallest[2] = { 0xFF, 0xFF };
+            t.Check(S16BeToFloat(minusOne) == -1.0f, L"l16 0x8000 -> -1.0");
+            t.Check(std::fabs(S16BeToFloat(maxPositive) - 32767.0f / 32768.0f) < 1e-7f, L"l16 0x7FFF -> +0.99997");
+            t.Check(std::fabs(S16BeToFloat(smallest) - 1.0f / 32768.0f) < 1e-9f, L"l16 0x0001");
+            t.Check(std::fabs(S16BeToFloat(minusSmallest) + 1.0f / 32768.0f) < 1e-9f, L"l16 0xFFFF");
+
+            uint8_t const stereo[4] = { 0x40, 0x00, 0xC0, 0x00 };
+            float converted[2] = {};
+            ConvertS16BeToFloat(stereo, 2, converted);
+            t.Check(converted[0] == 0.5f && converted[1] == -0.5f, L"l16 channel order preserved");
+
+            PcmRingBuffer ring(8, 2);
+            float in[12] = { 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6 };
+            float out[12] = {};
+            ring.Write(in, 6);
+            ring.Read(out, 4);
+            size_t const written = ring.Write(in, 6);
+            t.Check(written == 6 && ring.Available() == 8, L"ring wraps and caps at capacity");
+            ring.Read(out, 3);
+            t.Check(out[0] == 5.0f && out[2] == 6.0f && out[4] == 1.0f, L"ring preserves order across wrap");
+
+            AvSyncInputs inputs;
+            inputs.videoPipelineLatencyMs = 60;
+            inputs.audioOutputLatencyMs = 10;
+            t.Check(ComputeAudioTargetDelayMs(inputs) == 50, L"av sync target delay");
+            inputs.userOffsetMs = -200;
+            t.Check(ComputeAudioTargetDelayMs(inputs) == 20, L"av sync clamps to minimum");
+
+            // Receiver: a timestamp gap is concealed with exactly the missing frames.
+            auto stats = std::make_shared<ReceiverStats>();
+            auto pcm = std::make_shared<PcmRingBuffer>(44100, 2);
+            ReceiverSettings settings;
+            AudioReceiver receiver(settings, stats, pcm);
+            Bytes payload(400 * 4, 0x10);
+            auto now = Clock::now();
+            Bytes first = MakeRtp(10, 0, 0x55, false, payload);
+            Bytes third = MakeRtp(12, 800, 0x55, false, payload);
+            Bytes second = MakeRtp(11, 400, 0x55, false, payload);
+            receiver.ProcessDatagram(first.data(), first.size(), now);
+            receiver.ProcessDatagram(third.data(), third.size(), now);
+            receiver.ProcessDatagram(second.data(), second.size(), now);
+            t.Check(pcm->Available() == 1200 && stats->Get(Stat::AudioReordered) == 1, L"audio reorder without concealment");
+            Bytes gapped = MakeRtp(14, 1600, 0x55, false, payload);
+            receiver.ProcessDatagram(gapped.data(), gapped.size(), now + std::chrono::milliseconds(100));
+            t.Check(pcm->Available() == 1200, L"audio holds packet after sequence gap");
+            receiver.Poll(now + std::chrono::milliseconds(200));
+            t.Check(stats->Get(Stat::AudioLost) == 1 && stats->Get(Stat::AudioConcealedFrames) == 400 && pcm->Available() == 2000,
+                    L"audio conceals lost packet after reorder timeout");
+        }
+
+        // Largest deviation from an ideal sine when resampling 44.1 kHz to 48 kHz. Images and
+        // aliases add to the error, so a small value also means good stopband rejection.
+        double ResampleSineError(SincResampler const& resampler, double hz, uint32_t channels)
+        {
+            constexpr double kPi = 3.14159265358979323846;
+            double const ratio = 44100.0 / 48000.0;
+            size_t const inputFrames = 4096;
+            std::vector<float> stage(inputFrames * channels);
+            for (size_t n = 0; n < inputFrames; ++n)
+            {
+                float const v = static_cast<float>(0.5 * std::sin(2.0 * kPi * hz * n / 44100.0));
+                for (uint32_t c = 0; c < channels; ++c)
+                {
+                    stage[n * channels + c] = c == 0 ? v : -v;
+                }
+            }
+            double const start = 100.25;
+            size_t const outputFrames = 3000;
+            std::vector<float> out(outputFrames * channels);
+            resampler.Process(stage.data(), channels, start, ratio, out.data(), outputFrames);
+
+            double worst = 0.0;
+            for (size_t k = 0; k < outputFrames; ++k)
+            {
+                double const p = start + k * ratio;
+                double const ideal = 0.5 * std::sin(2.0 * kPi * hz * p / 44100.0);
+                worst = std::max(worst, std::fabs(out[k * channels] - ideal));
+                if (channels > 1)
+                {
+                    worst = std::max(worst, static_cast<double>(std::fabs(out[k * channels + 1] + out[k * channels])));
+                }
+            }
+            return worst;
+        }
+
+        void TestResampler(TestContext& t)
+        {
+            SincResampler resampler;
+            resampler.Configure(44100.0 / 48000.0);
+
+            std::vector<float> dc(256, 0.5f);
+            std::vector<float> out(64);
+            resampler.Process(dc.data(), 1, 50.37, 44100.0 / 48000.0, out.data(), out.size());
+            bool flat = true;
+            for (float v : out)
+            {
+                flat = flat && std::fabs(v - 0.5f) < 1e-5f;
+            }
+            t.Check(flat, L"resampler unity DC gain");
+
+            double const e1k = ResampleSineError(resampler, 1000.0, 2);
+            double const e10k = ResampleSineError(resampler, 10000.0, 1);
+            double const e16k = ResampleSineError(resampler, 16000.0, 1);
+            Log(L"resampler max error: 1 kHz %.2e, 10 kHz %.2e, 16 kHz %.2e (full scale 0.5)", e1k, e10k, e16k);
+            t.Check(e1k < 5e-4, L"resampler 1 kHz within -60 dB, stereo channels independent");
+            t.Check(e10k < 5e-4, L"resampler 10 kHz within -60 dB");
+            t.Check(e16k < 5e-4, L"resampler 16 kHz within -60 dB");
+        }
+    }
+
+    SelfTestResult RunSelfTests()
+    {
+        TestContext t;
+        TestRtpParser(t);
+        TestUnwrappers(t);
+        TestJitterBuffer(t);
+        TestTracker(t);
+        TestDepacketizer(t);
+        TestVideoPipeline(t);
+        TestSps(t);
+        TestGate(t);
+        TestVideoRecovery(t);
+        TestVideoTimeline(t);
+        TestFrameDelivery(t);
+        TestVideoDeliveryCore(t);
+        TestVideoIntegration(t);
+        TestAudio(t);
+        TestResampler(t);
+
+        SelfTestResult result;
+        result.passed = t.passed;
+        result.failed = t.failed;
+        std::wstring summary = L"Self-test: " + std::to_wstring(t.passed) + L" passed, " + std::to_wstring(t.failed) + L" failed";
+        summary += t.failures;
+        result.summary = winrt::hstring(summary);
+        Log(L"%s", summary.c_str());
+        return result;
+    }
+}

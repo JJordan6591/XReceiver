@@ -28,6 +28,16 @@ namespace rx
             config.maxPacketBytes = kMaxPacketBytes;
             return config;
         }
+
+        RtpAdmissionRules MakeAdmissionRules(ReceiverSettings const& s)
+        {
+            RtpAdmissionRules rules;
+            rules.payloadType = s.audioPayloadType;
+            rules.maxPacketBytes = kMaxPacketBytes;
+            rules.minPayloadBytes = kL16BytesPerFrame;
+            rules.takeoverAfterSilence = FromMs(s.ssrcTakeoverMs);
+            return rules;
+        }
     }
 
     AudioReceiver::AudioReceiver(ReceiverSettings const& settings, std::shared_ptr<ReceiverStats> stats,
@@ -35,6 +45,7 @@ namespace rx
         m_settings(settings),
         m_stats(std::move(stats)),
         m_ring(std::move(ring)),
+        m_admission(MakeAdmissionRules(settings)),
         m_jitter(MakeJitterConfig(settings)),
         m_convert(kConvertFrames * kL16Channels, 0.0f)
     {
@@ -140,32 +151,31 @@ namespace rx
         }
         m_stats->Add(Stat::AudioPackets);
         m_stats->Add(Stat::AudioBytes, static_cast<int64_t>(size));
-        m_lastPacketTicks = now.time_since_epoch().count();
-        m_everReceived = true;
 
         RtpPacketView packet;
-        if (ParseRtpPacket(data, size, packet) != RtpParseResult::Ok)
+        switch (AdmitRtpPacket(data, size, m_admission, m_tracker, now, packet))
         {
+        case RtpAdmission::Invalid:
+        case RtpAdmission::TooLarge:
+        case RtpAdmission::TooShort:
             m_stats->Add(Stat::AudioInvalid);
             return;
-        }
-        if (packet.payloadType != m_settings.audioPayloadType)
-        {
+        case RtpAdmission::WrongPayloadType:
             m_stats->Add(Stat::AudioWrongPayloadType);
             return;
-        }
-
-        switch (m_tracker.Check(packet, now, FromMs(m_settings.ssrcTakeoverMs)))
-        {
-        case TrackDecision::Ignore:
+        case RtpAdmission::Ignored:
             m_stats->Add(Stat::AudioForeignSsrc);
             return;
-        case TrackDecision::NewStream:
+        case RtpAdmission::NewStream:
             HandleNewStreamLocked();
             break;
-        case TrackDecision::Accept:
+        case RtpAdmission::Accept:
             break;
         }
+
+        // Rejected datagrams must not keep the session in Receiving or reset the idle timer.
+        m_lastPacketTicks = now.time_since_epoch().count();
+        m_everReceived = true;
 
         m_stats->Set(Stat::AudioSsrc, packet.ssrc);
         int64_t const extSequence = m_sequence.Unwrap(packet.sequence);

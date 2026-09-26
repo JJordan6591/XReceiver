@@ -1,10 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
 
+#include "LifecycleGuard.h"
 #include "MediaClock.h"
 #include "PcmRingBuffer.h"
 #include "ReceiverStats.h"
@@ -20,14 +22,21 @@ namespace rx
     class AudioPresenter : public std::enable_shared_from_this<AudioPresenter>
     {
     public:
+        // Called at most once, on AudioGraph's thread, after an unrecoverable graph error. It must
+        // not call Stop() synchronously; the owner marshals teardown to its own thread.
+        using FailureHandler = std::function<void()>;
+
         AudioPresenter(std::shared_ptr<PcmRingBuffer> ring, std::shared_ptr<ReceiverStats> stats, uint32_t inputRate);
         ~AudioPresenter();
 
         AudioPresenter(AudioPresenter const&) = delete;
         AudioPresenter& operator=(AudioPresenter const&) = delete;
 
+        void SetFailureHandler(FailureHandler handler);
+
         // Completes with IsRunning() false and LastError() set on failure; never throws.
         winrt::Windows::Foundation::IAsyncAction StartAsync();
+        // Owner's thread only. Idempotent.
         void Stop();
 
         void SetTargetDelayMs(int32_t ms) { m_targetMs.store(ms); }
@@ -60,14 +69,17 @@ namespace rx
 
         std::atomic<bool> m_stopRequested{ false };
         std::atomic<bool> m_running{ false };
+        OnceFlag m_failed;
         std::atomic<int32_t> m_targetMs{ 60 };
         std::atomic<int32_t> m_maxMs{ 300 };
         std::atomic<int64_t> m_outputLatencyUs{ 0 };
 
         mutable std::mutex m_errorLock;
         winrt::hstring m_lastError;
+        FailureHandler m_failureHandler;
 
-        // Written before the graph starts; audio-thread state afterwards.
+        // Written before the graph starts; audio-thread state afterwards. The stage is sized
+        // once for the largest render the quantum thread may request and never grows there.
         SincResampler m_resampler;
         double m_baseRatio = 1.0;
         std::vector<float> m_stage;     // kHistory frames of history, then unread input

@@ -106,6 +106,7 @@ namespace rx
 
         ReceiverSettings m_settings;
         std::shared_ptr<ReceiverStats> m_stats;
+        RtpAdmissionRules const m_admission;
         SourceRequestHandler m_sourceRequestHandler;
 
         // UI-thread only.

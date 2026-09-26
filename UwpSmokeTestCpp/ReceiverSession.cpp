@@ -94,7 +94,7 @@ namespace rx
             TearDown();
         }
 
-        uint64_t const generation = ++m_generation;
+        uint64_t const generation = m_generation.Advance();
         m_settings = settings;
         m_settings.Sanitize();
         m_avOffsetMs = m_settings.avOffsetMs;
@@ -139,7 +139,7 @@ namespace rx
             bindError = L"Could not bind video UDP port " + to_hstring(m_settings.videoPort) + L": " + e.message();
         }
         co_await resume_foreground(m_dispatcher);
-        if (generation != m_generation)
+        if (!m_generation.IsCurrent(generation))
         {
             co_return;
         }
@@ -158,6 +158,14 @@ namespace rx
             auto audioPresenter = std::make_shared<AudioPresenter>(ring, m_stats, kL16SampleRate);
             audioPresenter->SetMaxDelayMs(std::min(m_settings.audioMaxDelayMs + 200, 500));
             audioPresenter->SetTargetDelayMs(m_settings.audioMinDelayMs + 40);
+            std::weak_ptr<AudioPresenter> weakPresenter = audioPresenter;
+            audioPresenter->SetFailureHandler([weak, weakPresenter, generation]()
+                {
+                    if (auto self = weak.lock())
+                    {
+                        self->PostAudioFailed(weakPresenter, generation);
+                    }
+                });
             {
                 std::lock_guard<std::mutex> lock(m_componentsLock);
                 m_ring = ring;
@@ -175,7 +183,7 @@ namespace rx
                 audioBindError = L"Audio port " + to_hstring(m_settings.audioPort) + L" bind failed: " + e.message();
             }
             co_await resume_foreground(m_dispatcher);
-            if (generation != m_generation)
+            if (!m_generation.IsCurrent(generation))
             {
                 co_return;
             }
@@ -184,7 +192,7 @@ namespace rx
             {
                 co_await audioPresenter->StartAsync();
                 co_await resume_foreground(m_dispatcher);
-                if (generation != m_generation)
+                if (!m_generation.IsCurrent(generation))
                 {
                     co_return;
                 }
@@ -207,6 +215,11 @@ namespace rx
             SetAudioStatus(L"Audio disabled");
         }
 
+        // A Start superseded by Stop or a newer Start must not publish the timer or Waiting.
+        if (!m_generation.IsCurrent(generation))
+        {
+            co_return;
+        }
         m_timer = ThreadPoolTimer::CreatePeriodicTimer([weak](ThreadPoolTimer const&)
             {
                 if (auto self = weak.lock())
@@ -227,7 +240,7 @@ namespace rx
         {
             co_return;
         }
-        ++m_generation;
+        m_generation.Advance();
         m_state = ConnectionState::Stopping;
         TearDown();
         m_state = ConnectionState::Stopped;
@@ -344,13 +357,13 @@ namespace rx
     void ReceiverSession::PostSourceRequest(SpsInfo const& sps, uint64_t sourceId)
     {
         std::weak_ptr<ReceiverSession> weak = weak_from_this();
-        uint64_t const generation = m_generation.load();
+        uint64_t const generation = m_generation.Current();
         try
         {
             m_dispatcher.RunAsync(CoreDispatcherPriority::High, [weak, sps, sourceId, generation]()
                 {
                     auto self = weak.lock();
-                    if (!self || self->m_generation.load() != generation || !self->m_videoPresenter)
+                    if (!self || !self->m_generation.IsCurrent(generation) || !self->m_videoPresenter)
                     {
                         return;
                     }
@@ -381,13 +394,13 @@ namespace rx
     void ReceiverSession::PostMediaFailed(hstring const& message)
     {
         std::weak_ptr<ReceiverSession> weak = weak_from_this();
-        uint64_t const generation = m_generation.load();
+        uint64_t const generation = m_generation.Current();
         try
         {
             m_dispatcher.RunAsync(CoreDispatcherPriority::Normal, [weak, message, generation]()
                 {
                     auto self = weak.lock();
-                    if (self && self->m_generation.load() == generation)
+                    if (self && self->m_generation.IsCurrent(generation))
                     {
                         self->HandleMediaFailed(message);
                     }
@@ -396,6 +409,43 @@ namespace rx
         catch (hresult_error const&)
         {
         }
+    }
+
+    void ReceiverSession::PostAudioFailed(std::weak_ptr<AudioPresenter> presenter, uint64_t generation)
+    {
+        // Raised on AudioGraph's thread. Releasing the graph there could re-enter AudioGraph, so
+        // teardown runs on the UI thread that owns the session, and only for the same Start.
+        std::weak_ptr<ReceiverSession> weak = weak_from_this();
+        try
+        {
+            m_dispatcher.RunAsync(CoreDispatcherPriority::Normal, [weak, presenter, generation]()
+                {
+                    auto self = weak.lock();
+                    if (self && self->m_generation.IsCurrent(generation))
+                    {
+                        self->HandleAudioFailed(presenter.lock());
+                    }
+                });
+        }
+        catch (hresult_error const&)
+        {
+        }
+    }
+
+    void ReceiverSession::HandleAudioFailed(std::shared_ptr<AudioPresenter> const& presenter)
+    {
+        {
+            std::lock_guard<std::mutex> lock(m_componentsLock);
+            if (!presenter || presenter != m_audioPresenter)
+            {
+                return;
+            }
+        }
+        // Only the graph goes: video keeps playing and the audio receiver keeps counting packets,
+        // so audio activity still keeps a static screen in Receiving.
+        presenter->Stop();
+        SetAudioStatus(presenter->LastError());
+        Log(L"session: audio graph released after an unrecoverable error; video continues");
     }
 
     void ReceiverSession::HandleMediaFailed(hstring const& message)

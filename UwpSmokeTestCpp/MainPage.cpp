@@ -452,11 +452,13 @@ namespace winrt::UwpSmokeTestCpp::implementation
         m_toneStep = 0;
     }
 
+    // The app's only suspend cleanup (App::OnSuspending is intentionally empty). Every step is a
+    // no-op when already stopped, so a repeated suspend or a later Stop/shutdown is harmless.
     fire_and_forget MainPage::OnSuspending(IInspectable, SuspendingEventArgs args)
     {
         auto strong = get_strong();
         auto deferral = args.SuspendingOperation().GetDeferral();
-        m_wasRunningBeforeSuspend = m_session && m_session->IsActive();
+        m_wasRunningBeforeSuspend = m_wasRunningBeforeSuspend || (m_session && m_session->IsActive());
         StopPocs();
         if (m_session)
         {

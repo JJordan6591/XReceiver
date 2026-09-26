@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -15,6 +16,7 @@
 #include "H264KeyframeGate.h"
 #include "JitterBuffer.h"
 #include "L16Convert.h"
+#include "LifecycleGuard.h"
 #include "MediaClock.h"
 #include "PcmRingBuffer.h"
 #include "RtpPacket.h"
@@ -138,12 +140,13 @@ namespace rx
             return out;
         }
 
-        Bytes MakeSps(bool highProfile, uint32_t widthMbs, uint32_t heightMbs, uint32_t cropBottom, bool withRestriction)
+        Bytes MakeSps(bool highProfile, uint32_t widthMbs, uint32_t heightMbs, uint32_t cropBottom, bool withRestriction,
+                      uint32_t level = 40)
         {
             BitWriter w;
             w.Bits(highProfile ? 100 : 66, 8);
             w.Bits(0, 8);
-            w.Bits(40, 8);
+            w.Bits(level, 8);
             w.Ue(0); // sps id
             if (highProfile)
             {
@@ -349,6 +352,43 @@ namespace rx
             RtpPacketView late = jump;
             late.ssrc = 0xC;
             t.Check(tracker.Check(late, now + std::chrono::seconds(2), takeover) == TrackDecision::NewStream, L"tracker takeover after silence");
+        }
+
+        void TestRtpAdmission(TestContext& t)
+        {
+            RtpStreamTracker tracker;
+            RtpAdmissionRules rules;
+            rules.payloadType = 96;
+            rules.maxPacketBytes = 2048;
+            rules.minPayloadBytes = 4;
+            rules.takeoverAfterSilence = std::chrono::seconds(1);
+            auto const now = Clock::now();
+            RtpPacketView view;
+            auto admit = [&](Bytes const& datagram) { return AdmitRtpPacket(datagram.data(), datagram.size(), rules, tracker, now, view); };
+            Bytes const media(8, 0x11);
+
+            Bytes const garbage{ 0x12, 0x34, 0x56 };
+            Bytes const wrongPt = MakeRtp(1, 0, 0xA, false, media, 97);
+            Bytes const oversize = MakeRtp(1, 0, 0xA, false, Bytes(3000, 0x11));
+            Bytes const tooShort = MakeRtp(1, 0, 0xA, false, { 0x11, 0x22 });
+            t.Check(admit(garbage) == RtpAdmission::Invalid && admit(wrongPt) == RtpAdmission::WrongPayloadType &&
+                    admit(oversize) == RtpAdmission::TooLarge && admit(tooShort) == RtpAdmission::TooShort && !tracker.Locked(),
+                    L"admission rejects malformed, mistyped and mis-sized packets before the tracker");
+
+            t.Check(admit(MakeRtp(10, 0, 0xA, false, media)) == RtpAdmission::NewStream && tracker.Ssrc() == 0xA &&
+                    admit(MakeRtp(11, 400, 0xA, false, media)) == RtpAdmission::Accept, L"admission locks and accepts a valid stream");
+
+            bool const oversizeNoTakeover = admit(MakeRtp(500, 0, 0xB, false, Bytes(3000, 0x11))) == RtpAdmission::TooLarge &&
+                                            admit(MakeRtp(501, 0, 0xB, false, Bytes(3000, 0x11))) == RtpAdmission::TooLarge;
+            bool const wrongPtNoTakeover = admit(MakeRtp(600, 0, 0xB, false, media, 97)) == RtpAdmission::WrongPayloadType &&
+                                           admit(MakeRtp(601, 0, 0xB, false, media, 97)) == RtpAdmission::WrongPayloadType;
+            t.Check(oversizeNoTakeover && wrongPtNoTakeover && tracker.Ssrc() == 0xA &&
+                    admit(MakeRtp(12, 800, 0xA, false, media)) == RtpAdmission::Accept,
+                    L"admission: rejected foreign packets never count toward takeover");
+
+            t.Check(admit(MakeRtp(700, 0, 0xC, false, media)) == RtpAdmission::Ignored &&
+                    admit(MakeRtp(701, 0, 0xC, false, media)) == RtpAdmission::NewStream && tracker.Ssrc() == 0xC,
+                    L"admission keeps probation takeover for a valid new sender");
         }
 
         Bytes StapA(std::vector<Bytes> const& nals)
@@ -989,7 +1029,7 @@ namespace rx
             VideoTimeline::Config const config;
             struct Rate { int64_t step; int frames; wchar_t const* name; };
             for (Rate const rate : { Rate{ 1500, 60, L"timeline 60 fps spacing" }, Rate{ 1800, 50, L"timeline 50 fps spacing" },
-                                     Rate{ 3000, 30, L"timeline 30 fps spacing" } })
+                                     Rate{ 3000, 30, L"timeline 30 fps spacing" }, Rate{ 3750, 24, L"timeline 24 fps spacing" } })
             {
                 VideoTimeline timeline;
                 timeline.Configure(config);
@@ -1011,6 +1051,17 @@ namespace rx
                 t.Check(stamps[7].duration == config.maxDurationTicks && stamps[1].duration == 166667 && stamps[3].duration == 200000 &&
                         stamps[5].duration == 333333, L"timeline durations from adjacent RTP deltas");
                 t.Check(stamps[0].duration == config.defaultDurationTicks && stamps[0].pts == 0, L"timeline first sample");
+            }
+
+            {
+                // Rate switches between 24, 30, 50 and 60 fps keep RTP spacing and durations.
+                VideoTimeline timeline;
+                timeline.Configure(config);
+                std::vector<int64_t> const steps{ 3750, 3750, 3000, 1800, 1500, 1500, 3750, 1800, 3000, 1500, 3750 };
+                auto const stamps = RunTimeline(timeline, 42, steps);
+                t.Check(FollowsRtp(stamps, steps, config.maxDurationTicks) && StrictlyIncreasing(stamps) && timeline.Discontinuities() == 0 &&
+                        stamps[1].duration == 416667 && stamps[3].duration == 333333,
+                        L"timeline mixed 24/30/50/60 fps spacing");
             }
 
             {
@@ -1175,15 +1226,20 @@ namespace rx
             }
         }
 
-        // Stream access units the gate accepts: IDR with SPS/PPS, or a reference P slice.
-        AccessUnitPtr StreamAu(bool idr, int64_t rtp, Clock::time_point complete)
+        AccessUnitPtr TimedAu(std::vector<Bytes> const& nals, int64_t rtp, Clock::time_point complete)
         {
-            static Bytes const sps = MakeSps(false, 120, 68, 4, false);
-            AccessUnitPtr au = idr ? MakeAu({ sps, kPps, kIdrSlice }) : MakeAu({ kPSlice });
+            AccessUnitPtr au = MakeAu(nals);
             au->rtpTimestamp = rtp;
             au->completeTime = complete;
             au->firstPacketTime = complete;
             return au;
+        }
+
+        // Stream access units the gate accepts: IDR with SPS/PPS, or a reference P slice.
+        AccessUnitPtr StreamAu(bool idr, int64_t rtp, Clock::time_point complete)
+        {
+            static Bytes const sps = MakeSps(false, 120, 68, 4, false);
+            return idr ? TimedAu({ sps, kPps, kIdrSlice }, rtp, complete) : TimedAu({ kPSlice }, rtp, complete);
         }
 
         // Drives VideoDeliveryCore the way MediaStreamSource does: at most one outstanding
@@ -1196,6 +1252,7 @@ namespace rx
             {
                 if (out.openSource)
                 {
+                    openedFormat = out.openSource->first;
                     source = out.openSource->second;
                     ++opened;
                 }
@@ -1262,6 +1319,7 @@ namespace rx
             VideoDeliveryCore& core;
             uint64_t source = 0;
             uint64_t opened = 0;
+            SpsInfo openedFormat;
             uint64_t nextSerial = 0;
             bool outstanding = false;
             uint64_t outstandingSerial = 0;
@@ -1557,6 +1615,341 @@ namespace rx
             }
         }
 
+        // The SPS the decoder sees first in a submitted IDR (injected or carried).
+        SpsInfo LeadingSps(VideoDeliveryCore::Sample const& sample)
+        {
+            SpsInfo info;
+            AccessUnit const& au = *sample.au;
+            if (!au.nals.empty() && au.nals[0].type == h264::kNalSps)
+            {
+                ParseSps(au.data.data() + au.nals[0].offset, au.nals[0].size, info);
+            }
+            return info;
+        }
+
+        void TestFormatRecovery(TestContext& t)
+        {
+            auto const t0 = Clock::now();
+            VideoDeliveryCore::Config const defaults;
+            Bytes const sps720 = MakeSps(false, 80, 45, 0, false);
+            Bytes const sps1080 = MakeSps(false, 120, 68, 4, false);
+            auto at = [&](int64_t frame) { return FrameTime(t0, frame); };
+
+            {
+                // 720p source; a parameter-set-only AU switches the cached SPS to 1080p and the
+                // next IDR carries no SPS. That IDR must open a 1080p source.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(TimedAu({ sps720, kPps, kIdrSlice }, 0, at(0)), at(0));
+                mss.Request(at(0));
+                for (int64_t f = 1; f < 5; ++f)
+                {
+                    mss.Push(TimedAu({ kPSlice }, f * 1500, at(f)), at(f));
+                    mss.Request(at(f));
+                }
+                uint64_t const firstSource = mss.source;
+                bool const opened720 = mss.opened == 1 && mss.openedFormat.width == 1280 && mss.openedFormat.height == 720;
+
+                mss.Push(TimedAu({ sps1080, kPps }, 5 * 1500, at(5)), at(5));
+                t.Check(opened720 && mss.opened == 1 && core.SourceId() == firstSource &&
+                        core.CurrentPhase() == VideoDeliveryCore::Phase::Starting && core.Gate().Sps().width == 1920,
+                        L"format: SPS-only AU updates the cache without opening a source");
+
+                mss.Push(TimedAu({ kPSlice }, 6 * 1500, at(6)), at(6));
+                mss.Request(at(6));
+                t.Check(mss.samples.size() == 5 && core.Gate().IsWaiting() && stats->Get(Stat::DropAwaitingIdr) == 1 && mss.outstanding,
+                        L"format: a picture after the switch never reaches the old source");
+
+                mss.Push(TimedAu({ kIdrSlice }, 7 * 1500, at(7)), at(7));
+                mss.Request(at(7));
+                bool const rebuilt = mss.opened == 2 && mss.source != firstSource && mss.openedFormat.width == 1920 &&
+                                     mss.openedFormat.height == 1080 && mss.ended == 1;
+                bool const idrFirst = mss.samples.size() == 6 && mss.samples[5].keyframe && mss.samples[5].sourceId == mss.source &&
+                                      mss.samples[5].pts == 0 && LeadingSps(mss.samples[5]).width == 1920;
+                t.Check(rebuilt && idrFirst, L"format: IDR after an SPS-only change opens a 1080p source with the cached SPS");
+
+                mss.Push(TimedAu({ kPSlice }, 8 * 1500, at(8)), at(8));
+                mss.Request(at(8));
+                t.Check(mss.samples.size() == 7 && mss.samples[6].sourceId == mss.source && mss.opened == 2 && !core.Gate().IsWaiting(),
+                        L"format: the new source keeps decoding after the rebuild");
+            }
+
+            {
+                // An identical SPS repeated on its own, followed by a bare IDR, keeps the source.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(TimedAu({ sps1080, kPps, kIdrSlice }, 0, at(0)), at(0));
+                mss.Request(at(0));
+                for (int64_t f = 1; f < 20; ++f)
+                {
+                    if (f == 10)
+                    {
+                        mss.Push(TimedAu({ sps1080, kPps }, f * 1500, at(f)), at(f));
+                        mss.Push(TimedAu({ kIdrSlice }, f * 1500, at(f)), at(f));
+                    }
+                    else
+                    {
+                        mss.Push(TimedAu({ kPSlice }, f * 1500, at(f)), at(f));
+                    }
+                    mss.Request(at(f));
+                }
+                t.Check(mss.opened == 1 && stats->Get(Stat::SourceBuilds) == 1 && mss.samples.size() == 20 &&
+                        ContiguousSamples(mss.samples, 0, 1500) && stats->Get(Stat::AccessUnitsDiscarded) == 0,
+                        L"format: same-resolution SPS refresh keeps the source");
+            }
+
+            {
+                // SPS, PPS and IDR in one AU switch the source in both directions.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(TimedAu({ sps720, kPps, kIdrSlice }, 0, at(0)), at(0));
+                mss.Request(at(0));
+                mss.Push(TimedAu({ kPSlice }, 1500, at(1)), at(1));
+                mss.Request(at(1));
+                mss.Push(TimedAu({ sps1080, kPps, kIdrSlice }, 3000, at(2)), at(2));
+                mss.Request(at(2));
+                bool const to1080 = mss.opened == 2 && mss.openedFormat.width == 1920 && mss.samples.size() == 3 &&
+                                    mss.samples[2].keyframe && mss.samples[2].pts == 0;
+                mss.Push(TimedAu({ kPSlice }, 4500, at(3)), at(3));
+                mss.Request(at(3));
+                mss.Push(TimedAu({ sps720, kPps, kIdrSlice }, 6000, at(4)), at(4));
+                mss.Request(at(4));
+                t.Check(to1080 && mss.opened == 3 && mss.openedFormat.width == 1280 && mss.samples.size() == 5 &&
+                        stats->Get(Stat::DropAwaitingIdr) == 0, L"format: SPS/PPS/IDR in one AU switches the source");
+            }
+
+            {
+                // Periodic IDRs with the same SPS never rebuild.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                for (int64_t f = 0; f < 60; ++f)
+                {
+                    bool const idr = f % 10 == 0;
+                    mss.Push(idr ? TimedAu({ sps1080, kPps, kIdrSlice }, f * 1500, at(f)) : TimedAu({ kPSlice }, f * 1500, at(f)), at(f));
+                    mss.Request(at(f));
+                }
+                size_t keyframes = 0;
+                for (auto const& s : mss.samples)
+                {
+                    keyframes += s.keyframe ? 1 : 0;
+                }
+                t.Check(mss.opened == 1 && stats->Get(Stat::SourceBuilds) == 1 && mss.samples.size() == 60 && keyframes == 6 &&
+                        ContiguousSamples(mss.samples, 0, 1500), L"format: repeated same-format IDRs never rebuild the source");
+            }
+
+            {
+                // The descriptor declares the profile but not the level.
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(TimedAu({ sps1080, kPps, kIdrSlice }, 0, at(0)), at(0));
+                mss.Request(at(0));
+                mss.Push(TimedAu({ MakeSps(false, 120, 68, 4, false, 42), kPps, kIdrSlice }, 1500, at(1)), at(1));
+                mss.Request(at(1));
+                bool const levelKept = mss.opened == 1;
+                mss.Push(TimedAu({ MakeSps(true, 120, 68, 4, false), kPps, kIdrSlice }, 3000, at(2)), at(2));
+                mss.Request(at(2));
+                t.Check(levelKept && mss.opened == 2 && mss.openedFormat.profileIdc == 100 && mss.openedFormat.width == 1920,
+                        L"format: profile change rebuilds, level-only change keeps the source");
+            }
+
+            {
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                VideoDeliveryCore::Config config = defaults;
+                config.rebuildOnFormatChange = false;
+                core.Configure(config);
+                MssSim mss(core);
+                mss.Push(TimedAu({ sps720, kPps, kIdrSlice }, 0, at(0)), at(0));
+                mss.Request(at(0));
+                mss.Push(TimedAu({ sps1080, kPps }, 1500, at(1)), at(1));
+                mss.Push(TimedAu({ kIdrSlice }, 1500, at(1)), at(1));
+                mss.Request(at(1));
+                t.Check(mss.opened == 1 && mss.samples.size() == 2, L"format: rebuildOnFormatChange off keeps the source");
+            }
+        }
+
+        void TestNewStreamHandover(TestContext& t)
+        {
+            auto const t0 = Clock::now();
+            VideoDeliveryCore::Config const defaults;
+            auto at = [&](int64_t frame) { return FrameTime(t0, frame); };
+
+            // After a handover nothing reaches a decoder until the new stream's first complete IDR,
+            // which opens a fresh source at pts 0; callbacks for the old source change nothing.
+            auto finishHandover = [&](VideoDeliveryCore& core, MssSim& mss, uint64_t oldSource, int64_t frame)
+            {
+                size_t const before = mss.samples.size();
+                VideoDeliveryCore::Output staleOut;
+                core.OnSampleRendered(oldSource);
+                core.OnStarting(oldSource, 777);
+                core.OnSourceClosed(oldSource, staleOut);
+                std::optional<VideoDeliveryCore::Sample> immediate;
+                bool const staleRequest = core.OnRequest(oldSource, 9999, at(frame), immediate, staleOut) ==
+                                          VideoDeliveryCore::RequestResult::Stale && !immediate;
+                mss.Push(StreamAu(false, frame * 1500, at(frame)), at(frame));
+                bool const heldForIdr = mss.samples.size() == before && mss.opened == 1 &&
+                                        core.CurrentPhase() == VideoDeliveryCore::Phase::None && staleOut.completions.empty() && !staleOut.openSource;
+                mss.Push(StreamAu(true, (frame + 1) * 1500, at(frame + 1)), at(frame + 1));
+                mss.Request(at(frame + 1));
+                bool const reopened = mss.opened == 2 && mss.source != oldSource && mss.samples.size() == before + 1 &&
+                                      mss.samples.back().keyframe && mss.samples.back().pts == 0 && mss.samples.back().sampleSerial == 1 &&
+                                      mss.samples.back().sourceId == mss.source;
+                return staleRequest && heldForIdr && reopened;
+            };
+
+            {
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(StreamAu(true, 0, at(0)), at(0));
+                core.OnStarting(mss.source, 0);
+                mss.Request(at(0));
+                core.OnSampleRendered(mss.source);
+                for (int64_t f = 1; f < 30; ++f)
+                {
+                    mss.Push(StreamAu(false, f * 1500, at(f)), at(f));
+                    mss.Request(at(f));
+                }
+                uint64_t const oldSource = mss.source;
+                size_t const submitted = mss.samples.size();
+                VideoDeliveryCore::Output out;
+                core.OnNewStream(out);
+                mss.Absorb(out);
+                bool const ended = out.completions.empty() && core.CurrentPhase() == VideoDeliveryCore::Phase::None && core.QueueSize() == 0 &&
+                                   core.PendingCount() == 0 && core.Gate().IsWaiting() && !core.Gate().HasParameterSets();
+                bool const processedOnce = core.OnSampleProcessed(oldSource, 30) && !core.OnSampleProcessed(oldSource, 30);
+                t.Check(submitted == 30 && ended && processedOnce, L"handover during playback ends the old source");
+                t.Check(finishHandover(core, mss, oldSource, 40), L"handover during playback opens the new source on its IDR");
+            }
+
+            {
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(StreamAu(true, 0, at(0)), at(0));
+                for (int64_t f = 1; f < 30; ++f)
+                {
+                    mss.Push(StreamAu(false, f * 1500, at(f)), at(f));
+                }
+                uint64_t const oldSource = mss.source;
+                VideoDeliveryCore::Output out;
+                core.OnNewStream(out);
+                mss.Absorb(out);
+                t.Check(out.completions.empty() && core.QueueSize() == 0 && stats->Get(Stat::DropStale) == 30 &&
+                        core.CurrentPhase() == VideoDeliveryCore::Phase::None && mss.samples.empty(),
+                        L"handover during start-up buffering discards the old backlog");
+                t.Check(finishHandover(core, mss, oldSource, 40), L"handover during start-up buffering opens the new source on its IDR");
+            }
+
+            {
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(StreamAu(true, 0, at(0)), at(0));
+                mss.Request(at(0));
+                mss.Request(at(0));
+                uint64_t const oldSource = mss.source;
+                bool const waiting = mss.outstanding && core.PendingCount() == 1;
+                VideoDeliveryCore::Output out;
+                core.OnNewStream(out);
+                mss.Absorb(out);
+                bool const endedOnce = mss.ended == 1 && !mss.outstanding && core.PendingCount() == 0 &&
+                                       stats->Get(Stat::EndOfStreamCompletions) == 1;
+                VideoDeliveryCore::Output again;
+                core.OnNewStream(again);
+                mss.Absorb(again);
+                t.Check(waiting && endedOnce && again.completions.empty() && mss.ended == 1,
+                        L"handover completes an outstanding request exactly once");
+                t.Check(finishHandover(core, mss, oldSource, 40), L"handover with an outstanding request opens the new source on its IDR");
+            }
+
+            {
+                auto stats = std::make_shared<ReceiverStats>();
+                VideoDeliveryCore core(stats);
+                core.Configure(defaults);
+                MssSim mss(core);
+                mss.Push(StreamAu(true, 0, at(0)), at(0));
+                mss.Request(at(0));
+                mss.Push(StreamAu(false, 1500, at(1)), at(1));
+                mss.Request(at(1));
+                auto damaged = MakeAu({ kPSlice }, true);
+                damaged->rtpTimestamp = 3000;
+                mss.Push(std::move(damaged), at(2));
+                mss.Request(at(2));
+                bool const awaiting = core.Gate().IsWaiting() && mss.outstanding && stats->Get(Stat::IdrWaitsNetwork) == 1;
+                uint64_t const oldSource = mss.source;
+                VideoDeliveryCore::Output out;
+                core.OnNewStream(out);
+                mss.Absorb(out);
+                t.Check(awaiting && mss.ended == 1 && !mss.outstanding && core.CurrentPhase() == VideoDeliveryCore::Phase::None,
+                        L"handover during an IDR wait releases the waiting request");
+                t.Check(finishHandover(core, mss, oldSource, 40), L"handover during an IDR wait recovers on the new stream's IDR");
+            }
+        }
+
+        void TestDeliveryConfig(TestContext& t)
+        {
+            size_t const mib = 1024 * 1024;
+            ReceiverSettings defaults;
+            t.Check(VideoDeliveryCore::MakeConfig(defaults).maxBytes == 64 * mib && VideoDeliveryCore::Config{}.maxBytes == 64 * mib,
+                    L"config default byte cap stays 64 MiB");
+
+            ReceiverSettings settings;
+            settings.frameQueueMaxBytes = 12 * 1024 * 1024;
+            VideoDeliveryCore::Config const configured = VideoDeliveryCore::MakeConfig(settings);
+            t.Check(configured.maxBytes == 12 * mib, L"config propagates the configured byte cap");
+
+            ReceiverSettings low;
+            low.frameQueueMaxBytes = 1;
+            ReceiverSettings high;
+            high.frameQueueMaxBytes = std::numeric_limits<int32_t>::max();
+            size_t const minBytes = static_cast<size_t>(ReceiverSettings::kMinFrameQueueBytes);
+            size_t const maxBytes = static_cast<size_t>(ReceiverSettings::kMaxFrameQueueBytes);
+            bool const clampedConfig = VideoDeliveryCore::MakeConfig(low).maxBytes == minBytes &&
+                                       VideoDeliveryCore::MakeConfig(high).maxBytes == maxBytes;
+            low.Sanitize();
+            high.Sanitize();
+            t.Check(clampedConfig && low.frameQueueMaxBytes == ReceiverSettings::kMinFrameQueueBytes &&
+                    high.frameQueueMaxBytes == ReceiverSettings::kMaxFrameQueueBytes, L"config byte cap is clamped to safe bounds");
+
+            // The configured cap reaches admission: 1 MiB pictures while nothing is requested.
+            Bytes bigSlice(mib, 0x5A);
+            bigSlice[0] = 0x41;
+            Bytes const sps = MakeSps(false, 120, 68, 4, false);
+            auto const t0 = Clock::now();
+            auto fill = [&](VideoDeliveryCore::Config const& config, std::shared_ptr<ReceiverStats> const& stats)
+            {
+                VideoDeliveryCore core(stats);
+                core.Configure(config);
+                MssSim mss(core);
+                mss.Push(TimedAu({ sps, kPps, kIdrSlice }, 0, t0), t0);
+                for (int64_t f = 1; f <= 20; ++f)
+                {
+                    mss.Push(TimedAu({ bigSlice }, f * 1500, FrameTime(t0, f)), FrameTime(t0, f));
+                }
+                return core.QueueSize();
+            };
+            auto capped = std::make_shared<ReceiverStats>();
+            auto roomy = std::make_shared<ReceiverStats>();
+            size_t const cappedFrames = fill(configured, capped);
+            size_t const defaultFrames = fill(VideoDeliveryCore::MakeConfig(defaults), roomy);
+            t.Check(cappedFrames == 12 && capped->Get(Stat::DropStartupFull) == 1 && defaultFrames == 21 &&
+                    roomy->Get(Stat::DropStartupFull) == 0, L"config byte cap limits the delivery queue");
+        }
+
         void TestVideoIntegration(TestContext& t)
         {
             // RTP packets through the jitter buffer, depacketizer, gate, delivery and timeline:
@@ -1698,6 +2091,33 @@ namespace rx
                     L"audio conceals lost packet after reorder timeout");
         }
 
+        void TestAudioActivity(TestContext& t)
+        {
+            auto stats = std::make_shared<ReceiverStats>();
+            auto pcm = std::make_shared<PcmRingBuffer>(44100, 2);
+            ReceiverSettings settings;
+            AudioReceiver receiver(settings, stats, pcm);
+            Bytes const payload(400 * 4, 0x10);
+            auto feed = [&](Bytes const& datagram, Clock::time_point when) { receiver.ProcessDatagram(datagram.data(), datagram.size(), when); };
+
+            auto const t1 = Clock::now();
+            feed(Bytes{ 0x80, 0x60 }, t1);
+            feed(MakeRtp(1, 0, 0x55, false, payload, 97), t1);
+            feed(MakeRtp(1, 0, 0x55, false, Bytes(4000, 0x10)), t1);
+            feed(MakeRtp(1, 0, 0x55, false, { 0x10, 0x20 }), t1);
+            t.Check(!receiver.EverReceived() && stats->Get(Stat::AudioInvalid) == 3 && stats->Get(Stat::AudioWrongPayloadType) == 1 &&
+                    stats->Get(Stat::AudioPackets) == 4 && pcm->Available() == 0, L"audio activity ignores rejected datagrams");
+
+            feed(MakeRtp(10, 0, 0x55, false, payload), t1);
+            bool const accepted = receiver.EverReceived() && receiver.LastPacketTime() == t1;
+            auto const t2 = t1 + std::chrono::milliseconds(500);
+            feed(Bytes{ 0x80, 0x60, 0x00 }, t2);
+            feed(MakeRtp(11, 400, 0x55, false, payload, 97), t2);
+            feed(MakeRtp(900, 0, 0x77, false, payload), t2);
+            t.Check(accepted && receiver.LastPacketTime() == t1 && stats->Get(Stat::AudioForeignSsrc) == 1,
+                    L"audio idle timer is reset only by accepted packets");
+        }
+
         // Largest deviation from an ideal sine when resampling 44.1 kHz to 48 kHz. Images and
         // aliases add to the error, so a small value also means good stopband rejection.
         double ResampleSineError(SincResampler const& resampler, double hz, uint32_t channels)
@@ -1756,6 +2176,46 @@ namespace rx
             t.Check(e10k < 5e-4, L"resampler 10 kHz within -60 dB");
             t.Check(e16k < 5e-4, L"resampler 16 kHz within -60 dB");
         }
+
+        void TestAudioStage(TestContext& t)
+        {
+            // Render reads FramesNeeded stage frames from a position in [kHistory, kHistory + 1); the
+            // stage preallocated for a render size must cover it at every ratio the drift loop uses.
+            bool covered = true;
+            for (double const base : { 44100.0 / 48000.0, 1.0, 44100.0 / 32000.0 })
+            {
+                double const maxRatio = base * 1.005;
+                for (size_t const frames : { size_t{ 1 }, size_t{ 441 }, size_t{ 480 }, size_t{ 1024 }, size_t{ 3840 } })
+                {
+                    size_t const capacity = SincResampler::StageFrames(frames, maxRatio);
+                    for (double const ratio : { base * 0.995, base, maxRatio })
+                    {
+                        for (double const position : { static_cast<double>(SincResampler::kHistory), SincResampler::kHistory + 0.999999 })
+                        {
+                            covered = covered && SincResampler::FramesNeeded(position, frames, ratio) <= capacity;
+                        }
+                    }
+                }
+            }
+            t.Check(covered, L"audio stage capacity covers every render up to the quantum bound");
+        }
+
+        void TestLifecycle(TestContext& t)
+        {
+            LifecycleGeneration generation;
+            uint64_t const start = generation.Advance();
+            bool const currentWhileRunning = generation.IsCurrent(start);
+            generation.Advance();
+            bool const staleAfterStop = !generation.IsCurrent(start);
+            uint64_t const restart = generation.Advance();
+            t.Check(currentWhileRunning && staleAfterStop && restart != start && generation.IsCurrent(restart) && !generation.IsCurrent(start),
+                    L"lifecycle: Stop and a replacement Start invalidate an earlier Start");
+
+            OnceFlag failed;
+            bool const first = failed.Set();
+            bool const repeated = failed.Set();
+            t.Check(first && !repeated && failed.IsSet(), L"lifecycle: a failure is reported once");
+        }
     }
 
     SelfTestResult RunSelfTests()
@@ -1765,6 +2225,7 @@ namespace rx
         TestUnwrappers(t);
         TestJitterBuffer(t);
         TestTracker(t);
+        TestRtpAdmission(t);
         TestDepacketizer(t);
         TestVideoPipeline(t);
         TestSps(t);
@@ -1773,9 +2234,15 @@ namespace rx
         TestVideoTimeline(t);
         TestFrameDelivery(t);
         TestVideoDeliveryCore(t);
+        TestFormatRecovery(t);
+        TestNewStreamHandover(t);
+        TestDeliveryConfig(t);
         TestVideoIntegration(t);
         TestAudio(t);
+        TestAudioActivity(t);
         TestResampler(t);
+        TestAudioStage(t);
+        TestLifecycle(t);
 
         SelfTestResult result;
         result.passed = t.passed;

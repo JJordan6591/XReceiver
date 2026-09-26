@@ -132,6 +132,9 @@
     <ClInclude Include="ReceiverSession.h">
       <Filter>Session</Filter>
     </ClInclude>
+    <ClInclude Include="LifecycleGuard.h">
+      <Filter>Session</Filter>
+    </ClInclude>
     <ClInclude Include="ReceiverSettings.h">
       <Filter>Session</Filter>
     </ClInclude>

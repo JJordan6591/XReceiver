@@ -46,6 +46,7 @@ namespace rx
             s.maxFrameAgeMs = ReadInt(values, L"maxFrameAgeMs", s.maxFrameAgeMs);
             s.openQueueCap = ReadInt(values, L"openQueueCap", s.openQueueCap);
             s.startupQueueCap = ReadInt(values, L"startupQueueCap", s.startupQueueCap);
+            s.frameQueueMaxBytes = ReadInt(values, L"frameQueueMaxBytes", s.frameQueueMaxBytes);
             s.lossPolicy = static_cast<LossPolicy>(ReadInt(values, L"lossPolicy", static_cast<int32_t>(s.lossPolicy)));
             s.rebuildOnFormatChange = ReadBool(values, L"rebuildOnFormatChange", s.rebuildOnFormatChange);
             s.socketBufferBytes = ReadInt(values, L"socketBufferBytes", s.socketBufferBytes);
@@ -84,6 +85,7 @@ namespace rx
             values.Insert(L"maxFrameAgeMs", box_value(maxFrameAgeMs));
             values.Insert(L"openQueueCap", box_value(openQueueCap));
             values.Insert(L"startupQueueCap", box_value(startupQueueCap));
+            values.Insert(L"frameQueueMaxBytes", box_value(frameQueueMaxBytes));
             values.Insert(L"lossPolicy", box_value(static_cast<int32_t>(lossPolicy)));
             values.Insert(L"rebuildOnFormatChange", box_value(rebuildOnFormatChange));
             values.Insert(L"socketBufferBytes", box_value(socketBufferBytes));
@@ -127,6 +129,7 @@ namespace rx
         maxFrameAgeMs = std::clamp(maxFrameAgeMs, 20, 1000);
         openQueueCap = std::clamp(openQueueCap, frameQueueDepth, 240);
         startupQueueCap = std::clamp(startupQueueCap, openQueueCap, 1200);
+        frameQueueMaxBytes = std::clamp(frameQueueMaxBytes, kMinFrameQueueBytes, kMaxFrameQueueBytes);
         if (lossPolicy != LossPolicy::Strict && lossPolicy != LossPolicy::Tolerant) lossPolicy = defaults.lossPolicy;
         socketBufferBytes = std::clamp(socketBufferBytes, 64 * 1024, 16 * 1024 * 1024);
         audioMinDelayMs = std::clamp(audioMinDelayMs, 5, 500);

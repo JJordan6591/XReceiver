@@ -6,6 +6,7 @@
 #include <mutex>
 
 #include "H264Bitstream.h"
+#include "LifecycleGuard.h"
 #include "MediaClock.h"
 #include "ReceiverSettings.h"
 #include "ReceiverStats.h"
@@ -64,6 +65,8 @@ namespace rx
         void PostSourceRequest(SpsInfo const& sps, uint64_t sourceId);
         void PostMediaFailed(winrt::hstring const& message);
         void HandleMediaFailed(winrt::hstring const& message);
+        void PostAudioFailed(std::weak_ptr<AudioPresenter> presenter, uint64_t generation);
+        void HandleAudioFailed(std::shared_ptr<AudioPresenter> const& presenter);
         void SetError(winrt::hstring const& message);
         void SetAudioStatus(winrt::hstring const& message);
         void TearDown();
@@ -74,7 +77,7 @@ namespace rx
 
         ReceiverSettings m_settings;
         std::atomic<ConnectionState> m_state{ ConnectionState::Stopped };
-        std::atomic<uint64_t> m_generation{ 0 };
+        LifecycleGeneration m_generation;
         std::atomic<int32_t> m_avOffsetMs{ 0 };
 
         // Components are replaced on the UI thread and read by the housekeeping timer.

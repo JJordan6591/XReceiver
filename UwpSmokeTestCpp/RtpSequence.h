@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "MediaClock.h"
@@ -170,4 +171,62 @@ namespace rx
         bool m_hasBadSequence = false;
         uint16_t m_badSequence = 0;
     };
+
+    enum class RtpAdmission
+    {
+        Accept,             // the locked stream
+        NewStream,          // first packet of a new or restarted stream
+        Invalid,            // not a well-formed RTP packet
+        WrongPayloadType,
+        TooLarge,           // beyond the receive buffer limit
+        TooShort,           // payload smaller than one media unit
+        Ignored,            // another sender, or an unconfirmed restart
+    };
+
+    struct RtpAdmissionRules
+    {
+        int32_t payloadType = 96;
+        size_t maxPacketBytes = 2048;
+        size_t minPayloadBytes = 1;
+        Clock::duration takeoverAfterSilence = std::chrono::seconds(1);
+    };
+
+    // Every check a datagram must pass before it counts as sender activity. The stream tracker
+    // only ever sees well-formed packets of the expected payload type and size, so malformed or
+    // mistyped input can never lock, confirm or take over a stream.
+    inline RtpAdmission AdmitRtpPacket(uint8_t const* data, size_t size, RtpAdmissionRules const& rules,
+                                       RtpStreamTracker& tracker, Clock::time_point now, RtpPacketView& packet)
+    {
+        if (ParseRtpPacket(data, size, packet) != RtpParseResult::Ok)
+        {
+            return RtpAdmission::Invalid;
+        }
+        if (packet.payloadType != rules.payloadType)
+        {
+            return RtpAdmission::WrongPayloadType;
+        }
+        if (size > rules.maxPacketBytes)
+        {
+            return RtpAdmission::TooLarge;
+        }
+        if (packet.payloadSize < rules.minPayloadBytes)
+        {
+            return RtpAdmission::TooShort;
+        }
+        switch (tracker.Check(packet, now, rules.takeoverAfterSilence))
+        {
+        case TrackDecision::Accept:
+            return RtpAdmission::Accept;
+        case TrackDecision::NewStream:
+            return RtpAdmission::NewStream;
+        case TrackDecision::Ignore:
+            break;
+        }
+        return RtpAdmission::Ignored;
+    }
+
+    inline bool IsAdmitted(RtpAdmission admission)
+    {
+        return admission == RtpAdmission::Accept || admission == RtpAdmission::NewStream;
+    }
 }

@@ -125,6 +125,7 @@
     <ClInclude Include="H264KeyframeGate.h" />
     <ClInclude Include="JitterBuffer.h" />
     <ClInclude Include="L16Convert.h" />
+    <ClInclude Include="LifecycleGuard.h" />
     <ClInclude Include="MediaClock.h" />
     <ClInclude Include="PcmRingBuffer.h" />
     <ClInclude Include="PocSpikes.h" />

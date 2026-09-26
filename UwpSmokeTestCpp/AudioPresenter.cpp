@@ -33,6 +33,11 @@ namespace rx
         constexpr double kMaxCorrection = 0.005;    // 0.5 %
         constexpr double kCorrectionPerMs = 0.0001; // 10 ms error -> 0.1 %
 
+        // RequiredSamples is normally one quantum and a few after a stall. A request beyond
+        // this many quanta is rendered as silence rather than growing the stage.
+        constexpr size_t kMaxQuantaPerRender = 8;
+        constexpr size_t kMinStageFrames = 16384;
+
         wchar_t const* GraphErrorName(AudioGraphUnrecoverableError error)
         {
             switch (error)
@@ -51,8 +56,14 @@ namespace rx
         m_inputRate(inputRate),
         m_channels(m_ring->Channels())
     {
-        m_stage.resize(16384 * m_channels);
+        m_stage.resize(kMinStageFrames * m_channels);
         ResetPlayout();
+    }
+
+    void AudioPresenter::SetFailureHandler(FailureHandler handler)
+    {
+        std::lock_guard<std::mutex> lock(m_errorLock);
+        m_failureHandler = std::move(handler);
     }
 
     AudioPresenter::~AudioPresenter()
@@ -145,6 +156,10 @@ namespace rx
             uint32_t const nodeRate = actual.SampleRate();
             m_baseRatio = static_cast<double>(m_inputRate) / nodeRate;
             m_resampler.Configure(m_baseRatio);
+            size_t const quantum = static_cast<size_t>(std::max(m_graph.SamplesPerQuantum(), 0));
+            size_t const stageFrames = std::max(kMinStageFrames,
+                SincResampler::StageFrames(quantum * kMaxQuantaPerRender, m_baseRatio * (1.0 + kMaxCorrection)));
+            m_stage.assign(stageFrames * m_channels, 0.0f);
             ResetPlayout();
 
             m_input.AddOutgoingConnection(m_output);
@@ -226,13 +241,29 @@ namespace rx
         m_graph = nullptr;
     }
 
+    // AudioGraph's thread: records the failure and notifies the owner. Nothing here touches the
+    // graph, its nodes or its handlers; the owner calls Stop() on its own thread.
     void AudioPresenter::OnGraphError(AudioGraphUnrecoverableError error)
     {
+        if (!m_failed.Set())
+        {
+            return;
+        }
         m_stopRequested = true;
         m_running = false;
         m_stats->Set(Stat::AudioRunning, 0);
         m_stats->Add(Stat::AudioGraphErrors);
         SetError(hstring(L"AudioGraph stopped: ") + GraphErrorName(error) + L". Stop and start the receiver to recover audio.");
+
+        FailureHandler handler;
+        {
+            std::lock_guard<std::mutex> lock(m_errorLock);
+            handler = m_failureHandler;
+        }
+        if (handler)
+        {
+            handler();
+        }
     }
 
     // Real-time audio thread: no locks, no logging. The AudioFrame is the only allocation.
@@ -352,10 +383,12 @@ namespace rx
         m_stats->Set(Stat::AudioDriftPpm, static_cast<int64_t>(m_correction * 1e6));
 
         double const ratio = m_baseRatio * (1.0 + m_correction);
-        size_t const needed = static_cast<size_t>(std::floor(m_position + (frames - 1) * ratio)) + SincResampler::kLookahead + 1;
+        size_t const needed = SincResampler::FramesNeeded(m_position, frames, ratio);
         if (needed * m_channels > m_stage.size())
         {
-            m_stage.resize(needed * m_channels);
+            std::memset(out, 0, frames * m_channels * sizeof(float));
+            m_stats->Add(Stat::AudioCallbackErrors);
+            return;
         }
         if (m_staged < needed)
         {

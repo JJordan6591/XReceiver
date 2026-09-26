@@ -85,6 +85,8 @@ namespace rx
     {
         CloseSource(false);
 
+        // No frame rate is declared: it is optional for the H.264 decoder's input type, and the
+        // RTP-derived sample timestamps and durations are the only clock.
         VideoEncodingProperties properties = VideoEncodingProperties::CreateH264();
         if (sps.valid)
         {
@@ -92,8 +94,6 @@ namespace rx
             properties.Height(sps.height);
             properties.ProfileId(static_cast<int32_t>(sps.profileIdc));
         }
-        properties.FrameRate().Numerator(60);
-        properties.FrameRate().Denominator(1);
 
         VideoStreamDescriptor descriptor(properties);
         MediaStreamSource source(descriptor);

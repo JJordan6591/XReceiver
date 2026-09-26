@@ -17,6 +17,7 @@ namespace rx
     namespace
     {
         constexpr uint32_t kVideoClockRate = 90000;
+        constexpr size_t kMaxPacketBytes = 2048;
 
         double TicksToMs(int64_t ticks)
         {
@@ -29,14 +30,25 @@ namespace rx
             config.reorderWindow = s.videoReorderWindow;
             config.capacity = static_cast<size_t>(s.videoReorderWindow) * 2;
             config.timeout = FromMs(s.videoReorderTimeoutMs);
-            config.maxPacketBytes = 2048;
+            config.maxPacketBytes = kMaxPacketBytes;
             return config;
+        }
+
+        RtpAdmissionRules MakeAdmissionRules(ReceiverSettings const& s)
+        {
+            RtpAdmissionRules rules;
+            rules.payloadType = s.videoPayloadType;
+            rules.maxPacketBytes = kMaxPacketBytes;
+            rules.minPayloadBytes = 1;
+            rules.takeoverAfterSilence = FromMs(s.ssrcTakeoverMs);
+            return rules;
         }
     }
 
     VideoReceiver::VideoReceiver(ReceiverSettings const& settings, std::shared_ptr<ReceiverStats> stats) :
         m_settings(settings),
         m_stats(std::move(stats)),
+        m_admission(MakeAdmissionRules(settings)),
         m_jitter(MakeJitterConfig(settings)),
         m_depacketizer([this](AccessUnitPtr au) { OnAccessUnitLocked(std::move(au)); }),
         m_core(m_stats)
@@ -173,20 +185,33 @@ namespace rx
     {
         m_stats->Add(Stat::VideoPackets);
         m_stats->Add(Stat::VideoBytes, static_cast<int64_t>(size));
-        m_everReceived = true;
-        m_lastPacket = now;
 
         RtpPacketView packet;
-        if (ParseRtpPacket(data, size, packet) != RtpParseResult::Ok)
+        switch (AdmitRtpPacket(data, size, m_admission, m_tracker, now, packet))
         {
+        case RtpAdmission::Invalid:
+        case RtpAdmission::TooShort:
             m_stats->Add(Stat::VideoInvalid);
             return;
-        }
-        if (packet.payloadType != m_settings.videoPayloadType)
-        {
+        case RtpAdmission::WrongPayloadType:
             m_stats->Add(Stat::VideoWrongPayloadType);
             return;
+        case RtpAdmission::TooLarge:
+            m_stats->Add(Stat::VideoTooLarge);
+            return;
+        case RtpAdmission::Ignored:
+            m_stats->Add(Stat::VideoForeignSsrc);
+            return;
+        case RtpAdmission::NewStream:
+            HandleNewStreamLocked();
+            break;
+        case RtpAdmission::Accept:
+            break;
         }
+
+        // Rejected datagrams must not keep the session in Receiving or reset the idle timer.
+        m_everReceived = true;
+        m_lastPacket = now;
 
         if (!m_core.Gate().HasParameterSets() && LooksLikeHevcPayload(packet.payload, packet.payloadSize))
         {
@@ -196,18 +221,6 @@ namespace rx
                 m_stats->Set(Stat::HevcDetected, 1);
                 Log(L"video: stream looks like HEVC");
             }
-        }
-
-        switch (m_tracker.Check(packet, now, FromMs(m_settings.ssrcTakeoverMs)))
-        {
-        case TrackDecision::Ignore:
-            m_stats->Add(Stat::VideoForeignSsrc);
-            return;
-        case TrackDecision::NewStream:
-            HandleNewStreamLocked();
-            break;
-        case TrackDecision::Accept:
-            break;
         }
 
         int64_t const extSequence = m_sequence.Unwrap(packet.sequence);
@@ -253,7 +266,9 @@ namespace rx
         m_depacketizer.Reset();
         m_hevcHits = 0;
         m_hasLastIdr = false;
-        m_core.OnNewStream();
+        VideoDeliveryCore::Output out;
+        m_core.OnNewStream(out);
+        CollectLocked(out, Clock::now());
     }
 
     void VideoReceiver::OnOrderedPacket(RtpPacketView const& packet, int64_t extSequence, Clock::time_point arrival)

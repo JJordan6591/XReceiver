@@ -102,15 +102,16 @@ void App::OnLaunched(LaunchActivatedEventArgs const& e)
 }
 
 /// <summary>
-/// Invoked when application execution is being suspended.  Application state is saved
-/// without knowing whether the application will be terminated or resumed with the contents
-/// of memory still intact.
+/// Invoked when application execution is being suspended.
 /// </summary>
-/// <param name="sender">The source of the suspend request.</param>
-/// <param name="e">Details about the suspend request.</param>
+/// <remarks>
+/// Deliberately empty. MainPage owns the receive session (sockets, housekeeping timer,
+/// AudioGraph, MediaStreamSource) and the display request, and its Suspending handler is the
+/// single authoritative cleanup path. Moving the session out of MainPage (for example to add a
+/// second page) must move that cleanup here, keeping it the only one.
+/// </remarks>
 void App::OnSuspending([[maybe_unused]] IInspectable const& sender, [[maybe_unused]] SuspendingEventArgs const& e)
 {
-    // Save application state and stop any background activity
 }
 
 /// <summary>

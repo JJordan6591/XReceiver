@@ -29,6 +29,7 @@ namespace rx
         int32_t maxFrameAgeMs = 100;
         int32_t openQueueCap = 60;
         int32_t startupQueueCap = 600;
+        int32_t frameQueueMaxBytes = 64 * 1024 * 1024;
 
         LossPolicy lossPolicy = LossPolicy::Strict;
 
@@ -47,6 +48,11 @@ namespace rx
         int32_t ssrcTakeoverMs = 1000;
 
         static constexpr int32_t kMinIdleTimeoutMs = 5000;
+
+        // The minimum holds two of the largest access units the depacketizer emits (4 MiB), so
+        // an IDR can always be admitted.
+        static constexpr int32_t kMinFrameQueueBytes = 8 * 1024 * 1024;
+        static constexpr int32_t kMaxFrameQueueBytes = 256 * 1024 * 1024;
 
         static ReceiverSettings Load();
         void Save() const;

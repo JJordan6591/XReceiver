@@ -49,6 +49,7 @@ namespace rx
         ReceiverSettings m_settings;
         std::shared_ptr<ReceiverStats> m_stats;
         std::shared_ptr<PcmRingBuffer> m_ring;
+        RtpAdmissionRules const m_admission;
 
         winrt::Windows::Networking::Sockets::DatagramSocket m_socket{ nullptr };
         winrt::Windows::Networking::Sockets::DatagramSocket::MessageReceived_revoker m_messageRevoker;

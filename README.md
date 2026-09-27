@@ -48,7 +48,7 @@ UxPlay is installed and configured on its own. XReceiver is the UWP app you buil
 4. Select Debug or Release, x64.
 5. Build.
 
-The source folder is still `UwpSmokeTestCpp`. The project file is `UwpSmokeTestCpp/XReceiver.vcxproj`. C++/WinRT generates `Generated Files/module.g.cpp` during the build and the project compiles that file once. Do not commit the generated directory.
+The project file is `XReceiver/XReceiver.vcxproj`. If the folder that contains this checkout still uses an older name, rename that outer folder only after you close Cursor and Visual Studio. C++/WinRT generates `XReceiver/Generated Files/module.g.cpp` during the build and the project compiles that file once. Do not commit the generated directory.
 
 Take latency measurements on Release x64. Debug is slower.
 
@@ -58,7 +58,7 @@ Take latency measurements on Release x64. Debug is slower.
 2. Enter the Xbox address. Visual Studio stores it in `XReceiver.vcxproj.user`. That file is gitignored. Do not commit it.
 3. Deploy from Visual Studio.
 
-Local packaging creates a development certificate, typically `UwpSmokeTestCpp_TemporaryKey.pfx` or a similarly named `.pfx` next to the project. That file is a private key. It is gitignored. Do not commit `.pfx`, `.cer`, or `.snk` files. Another PC creates its own test certificate in the manifest designer (Packaging) or on the first package build. A sideload user must trust the certificate that signed the package they install. This repository does not publish a certificate or an `.appx`.
+Local packaging creates a development certificate, usually a `TemporaryKey.pfx` next to the project. That file is a private key. It is gitignored. Do not commit `.pfx`, `.cer`, or `.snk` files. Another PC creates its own test certificate in the manifest designer (Packaging) or on the first package build. A sideload user must trust the certificate that signed the package they install. This repository does not publish a certificate or an `.appx`. Do not distribute a package signed with a temporary development key.
 
 The package identity name and publisher are unchanged from earlier development builds so an upgrade can keep local settings. The manifest version is `1.0.0.0`. The preview label `v0.1.0-preview` is a GitHub release name, not a package downgrade, and it is not tagged yet.
 
@@ -117,7 +117,7 @@ On a Release build, with a controller:
 7. Look at 1080p, and at 4K output only as UI scaling
 8. Confirm Release has no Self-test or PoC controls
 
-Host tests do not replace this. See `CONTRIBUTING.md` for `tools\run-host-selftest.cmd`.
+Host tests do not replace this. The blank form is `docs/XBOX_RC_CHECKLIST.md`. See `CONTRIBUTING.md` for `tools\run-host-selftest.cmd`. The maintainer checklist is `docs/RELEASE_CHECKLIST.md`.
 
 ## Troubleshooting
 
@@ -135,6 +135,12 @@ UDP is unauthenticated and unencrypted. Use a trusted LAN. Do not forward ports 
 ## Contributing
 
 See `CONTRIBUTING.md`.
+
+## Releases
+
+The first public preview is a source release. `v0.1.0-preview` is the GitHub name. It is not tagged yet. The UWP package version stays `1.0.0.0`.
+
+A UWP package has to be signed. A local Developer Mode build may use the temporary certificate Visual Studio creates on that PC. Leave that key untracked. A public binary needs a different release certificate, a build from the reviewed tag, and published checksums. Installing that package means trusting the signing certificate. It is not Microsoft Store trust. Binary publication stays blocked until a release certificate exists.
 
 ## License
 

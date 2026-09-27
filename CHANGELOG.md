@@ -1,30 +1,38 @@
 # Changelog
 
+## v0.1.0-preview
+
+Release candidate prepared on 2026-09-27. Not tagged. Not a Microsoft Store package. Manifest version stays `1.0.0.0` so an upgrade is not a downgrade. The GitHub name `v0.1.0-preview` is separate from that package version.
+
+XReceiver is an Xbox Developer Mode app. It receives H.264 video (UDP 5000) and L16 stereo audio (UDP 5002) forwarded by a separate UxPlay server on a trusted LAN. It does not implement AirPlay. It is not affiliated with Apple, Microsoft, Xbox, or UxPlay. It is not a native 4K receiver. UDP is unauthenticated and unencrypted. Do not forward the ports from the internet.
+
+### User-facing
+
+- Ten-foot UI, first-run help, and controller focus
+- Overlay modes: Automatic, Always visible, and Video only
+- Plain-language status for waiting, receiving, reconnecting, and errors
+- Manual A/V offset. Positive means audio later
+- Diagnostics and health counters, hidden until requested
+- Display name XReceiver. Package identity is unchanged, so local settings survive an upgrade
+
+### Known limits
+
+- H.264 up to the existing 1080p60 target. A 4K television may scale that picture
+- No HEVC
+- No automatic A/V sync
+- Host tests do not prove memory safety
+- Xbox UI and playback for this candidate have not been signed off
+- A public binary is blocked until a release certificate exists. Do not ship a package signed with a temporary development key
+
+### Already in this line
+
+- RTP receiver prototype
+- Reliability hardening
+- Security hardening and hostile-input tests
+- Health diagnostics
+- Repository ignore rules
+- Rename from the smoke-test project name
+
 ## Unreleased
 
-### v0.1.0-preview
-
-Preview for Xbox Developer Mode. Not a Microsoft Store app. Not affiliated with Apple, Microsoft, Xbox, or UxPlay. Not a native 4K receiver. Not production-certified.
-
-XReceiver receives H.264 video and L16 audio RTP that a separate UxPlay server forwards on the LAN. It does not implement AirPlay.
-
-Highlights already in this preview line:
-
-- Working RTP receiver prototype for Xbox Developer Mode
-- Reliability hardening for format changes, idle detection, and source lifecycle
-- Ten-foot UI, first-run help, and settings migration
-- Parser hardening and hostile-input tests
-- Health diagnostics and a short validation runbook
-- Automatic, Always visible, and Video only overlays
-- Repository ignore rules for build output and local certificates
-- Rename to XReceiver without changing the package identity, so an installed build can upgrade and keep local settings
-
-Manifest package version remains `1.0.0.0` so an upgrade is not a downgrade. The GitHub preview name `v0.1.0-preview` is not a tag yet. Do not create the tag until the Xbox checklist in `README.md` has been run.
-
-This preview:
-
-- Runs in Xbox Developer Mode
-- Depends on a separate UxPlay server
-- Targets H.264 up to 1080p60 and L16 stereo
-- Listens on UDP 5000 and UDP 5002 by default
-- Is for a trusted LAN only
+Nothing yet beyond the candidate above.

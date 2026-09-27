@@ -22,6 +22,10 @@ Useful reports include:
 
 There is no separate security email address for this project.
 
+## Manifest capabilities
+
+The package requests `internetClient`, `privateNetworkClientServer`, and `internetClientServer`. Those capabilities are how this UWP build is allowed to receive LAN UDP. Removing them would need a new Xbox test and is not part of the preview candidate.
+
 ## Network assumptions
 
 XReceiver accepts unauthenticated, unencrypted UDP. It is meant for a trusted private LAN.

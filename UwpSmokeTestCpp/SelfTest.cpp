@@ -25,6 +25,11 @@
 #include "FrameDelivery.h"
 #include "VideoDeliveryCore.h"
 #include "VideoTimeline.h"
+#include "ReceiverSettings.h"
+
+using namespace winrt;
+using namespace winrt::Windows::Foundation;
+using namespace winrt::Windows::Foundation::Collections;
 
 namespace rx
 {
@@ -2200,6 +2205,108 @@ namespace rx
             t.Check(covered, L"audio stage capacity covers every render up to the quantum bound");
         }
 
+        IPropertySet MakeSettingsMap()
+        {
+            return PropertySet();
+        }
+
+        void TestReceiverSettings(TestContext& t)
+        {
+            IPropertySet empty = MakeSettingsMap();
+            ReceiverSettings clean = ReceiverSettings::LoadFromValues(empty);
+            clean.Sanitize();
+            t.Check(!clean.diagnosticsVisible && !clean.firstRunDismissed && clean.avOffsetMs == 0 &&
+                        clean.videoPort == 5000 && clean.audioPort == 5002,
+                    L"settings: clean install defaults");
+
+            IPropertySet migratedClean = MakeSettingsMap();
+            ReceiverSettings::MigrateStoredSettings(migratedClean);
+            ReceiverSettings migratedDefaults = ReceiverSettings::LoadFromValues(migratedClean);
+            migratedDefaults.Sanitize();
+            t.Check(!migratedDefaults.diagnosticsVisible && !migratedDefaults.firstRunDismissed &&
+                        unbox_value_or<int32_t>(migratedClean.TryLookup(L"settingsVersion"), 0) ==
+                            ReceiverSettings::kCurrentSettingsVersion,
+                    L"settings: clean migration stamps schema version without changing defaults");
+
+            IPropertySet current = MakeSettingsMap();
+            ReceiverSettings written;
+            written.diagnosticsVisible = true;
+            written.firstRunDismissed = true;
+            written.avOffsetMs = 100;
+            written.videoPort = 5010;
+            written.audioPort = 5012;
+            written.WriteToValues(current);
+            ReceiverSettings loaded = ReceiverSettings::LoadFromValues(current);
+            loaded.Sanitize();
+            t.Check(loaded.diagnosticsVisible && loaded.firstRunDismissed && loaded.avOffsetMs == 100 &&
+                        loaded.videoPort == 5010 && loaded.audioPort == 5012 &&
+                        unbox_value_or<int32_t>(current.TryLookup(L"settingsVersion"), 0) == ReceiverSettings::kCurrentSettingsVersion,
+                    L"settings: current schema round trip");
+
+            IPropertySet legacy = MakeSettingsMap();
+            legacy.Insert(L"videoPort", box_value(5001));
+            legacy.Insert(L"avOffsetMs", box_value(100));
+            legacy.Insert(L"diagnosticsVisible", box_value(true));
+            legacy.Insert(L"acceptRecoveryPoint", box_value(true));
+            ReceiverSettings::MigrateStoredSettings(legacy);
+            ReceiverSettings legacyLoaded = ReceiverSettings::LoadFromValues(legacy);
+            legacyLoaded.Sanitize();
+            t.Check(legacyLoaded.avOffsetMs == 100 && legacyLoaded.diagnosticsVisible && legacyLoaded.videoPort == 5001 &&
+                        !legacy.HasKey(L"acceptRecoveryPoint") &&
+                        unbox_value_or<int32_t>(legacy.TryLookup(L"settingsVersion"), 0) == ReceiverSettings::kCurrentSettingsVersion,
+                    L"settings: unversioned migration preserves values and removes obsolete keys");
+
+            IPropertySet legacyDiagDefault = MakeSettingsMap();
+            legacyDiagDefault.Insert(L"videoPort", box_value(5000));
+            ReceiverSettings::MigrateStoredSettings(legacyDiagDefault);
+            ReceiverSettings legacyDiagLoaded = ReceiverSettings::LoadFromValues(legacyDiagDefault);
+            legacyDiagLoaded.Sanitize();
+            t.Check(legacyDiagLoaded.diagnosticsVisible, L"settings: legacy install without diagnostics key keeps prior default");
+
+            IPropertySet invalid = MakeSettingsMap();
+            invalid.Insert(L"settingsVersion", box_value(ReceiverSettings::kCurrentSettingsVersion));
+            invalid.Insert(L"avOffsetMs", box_value(9000));
+            invalid.Insert(L"videoPort", box_value(80));
+            ReceiverSettings invalidLoaded = ReceiverSettings::LoadFromValues(invalid);
+            invalidLoaded.Sanitize();
+            t.Check(invalidLoaded.avOffsetMs == 500 && invalidLoaded.videoPort == 5000,
+                    L"settings: invalid values are clamped on load");
+
+            IPropertySet repeat = MakeSettingsMap();
+            repeat.Insert(L"timestampMode", box_value(1));
+            ReceiverSettings::MigrateStoredSettings(repeat);
+            ReceiverSettings::MigrateStoredSettings(repeat);
+            t.Check(!repeat.HasKey(L"timestampMode") &&
+                        unbox_value_or<int32_t>(repeat.TryLookup(L"settingsVersion"), 0) == ReceiverSettings::kCurrentSettingsVersion,
+                    L"settings: migration is idempotent");
+
+            IPropertySet future = MakeSettingsMap();
+            future.Insert(L"settingsVersion", box_value(ReceiverSettings::kCurrentSettingsVersion + 7));
+            future.Insert(L"avOffsetMs", box_value(-40));
+            future.Insert(L"experimentalFeature", box_value(true));
+            ReceiverSettings::MigrateStoredSettings(future);
+            ReceiverSettings futureLoaded = ReceiverSettings::LoadFromValues(future);
+            futureLoaded.Sanitize();
+            t.Check(futureLoaded.avOffsetMs == -40 && future.HasKey(L"experimentalFeature") &&
+                        unbox_value_or<int32_t>(future.TryLookup(L"settingsVersion"), 0) ==
+                            ReceiverSettings::kCurrentSettingsVersion + 7,
+                    L"settings: unknown future schema version is preserved");
+
+            IPropertySet diagOn = MakeSettingsMap();
+            diagOn.Insert(L"settingsVersion", box_value(ReceiverSettings::kCurrentSettingsVersion));
+            diagOn.Insert(L"diagnosticsVisible", box_value(true));
+            ReceiverSettings diagLoaded = ReceiverSettings::LoadFromValues(diagOn);
+            diagLoaded.Sanitize();
+            t.Check(diagLoaded.diagnosticsVisible, L"settings: diagnostics preference preserved");
+
+            IPropertySet offset = MakeSettingsMap();
+            offset.Insert(L"settingsVersion", box_value(ReceiverSettings::kCurrentSettingsVersion));
+            offset.Insert(L"avOffsetMs", box_value(100));
+            ReceiverSettings offsetLoaded = ReceiverSettings::LoadFromValues(offset);
+            offsetLoaded.Sanitize();
+            t.Check(offsetLoaded.avOffsetMs == 100, L"settings: manual A/V offset preserved");
+        }
+
         void TestLifecycle(TestContext& t)
         {
             LifecycleGeneration generation;
@@ -2243,6 +2350,7 @@ namespace rx
         TestResampler(t);
         TestAudioStage(t);
         TestLifecycle(t);
+        TestReceiverSettings(t);
 
         SelfTestResult result;
         result.passed = t.passed;

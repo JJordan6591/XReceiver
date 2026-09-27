@@ -92,6 +92,16 @@
       <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <TreatWarningAsError>true</TreatWarningAsError>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <TreatWarningAsError>true</TreatWarningAsError>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
     <ClCompile>
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -185,11 +195,11 @@
     <ClCompile Include="H264KeyframeGate.cpp" />
     <ClCompile Include="JitterBuffer.cpp" />
     <ClCompile Include="MediaClock.cpp" />
-    <ClCompile Include="PocSpikes.cpp" />
+    <ClCompile Include="PocSpikes.cpp" Condition="'$(Configuration)|$(Platform)'!='Release|x64'" />
     <ClCompile Include="ReceiverSession.cpp" />
     <ClCompile Include="ReceiverSettings.cpp" />
     <ClCompile Include="RtpPacket.cpp" />
-    <ClCompile Include="SelfTest.cpp" />
+    <ClCompile Include="SelfTest.cpp" Condition="'$(Configuration)|$(Platform)'!='Release|x64'" />
     <ClCompile Include="SincResampler.cpp" />
     <ClCompile Include="VideoPresenter.cpp" />
     <ClCompile Include="VideoReceiver.cpp" />

@@ -2,6 +2,11 @@
 
 #include <cstdint>
 
+namespace winrt::Windows::Foundation::Collections
+{
+    struct IPropertySet;
+}
+
 namespace rx
 {
     enum class LossPolicy : int32_t
@@ -18,7 +23,8 @@ namespace rx
         int32_t audioPayloadType = 96;
         bool audioEnabled = true;
         bool autoStart = true;
-        bool diagnosticsVisible = true;
+        bool diagnosticsVisible = false;
+        bool firstRunDismissed = false;
 
         int32_t videoReorderTimeoutMs = 10;
         int32_t videoReorderWindow = 256;
@@ -54,8 +60,14 @@ namespace rx
         static constexpr int32_t kMinFrameQueueBytes = 8 * 1024 * 1024;
         static constexpr int32_t kMaxFrameQueueBytes = 256 * 1024 * 1024;
 
+        static constexpr int32_t kCurrentSettingsVersion = 2;
+
         static ReceiverSettings Load();
+        static ReceiverSettings LoadFromValues(winrt::Windows::Foundation::Collections::IPropertySet const& values);
+        static bool HasPersistedUserSettings(winrt::Windows::Foundation::Collections::IPropertySet const& values);
+        static void MigrateStoredSettings(winrt::Windows::Foundation::Collections::IPropertySet& values);
         void Save() const;
+        void WriteToValues(winrt::Windows::Foundation::Collections::IPropertySet& values) const;
         void Sanitize();
 
         static bool IsValidPort(int32_t port) { return port >= 1024 && port <= 65535; }

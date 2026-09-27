@@ -11,9 +11,11 @@
 
 namespace rx
 {
+#ifdef _DEBUG
     class PocClipPlayer;
     class PocSocketCounter;
     class PocToneTest;
+#endif
 }
 
 namespace winrt::UwpSmokeTestCpp::implementation
@@ -33,6 +35,8 @@ namespace winrt::UwpSmokeTestCpp::implementation
         void OnStartClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
         void OnStopClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
         void OnDiagnosticsClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
+        void OnHelpClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
+        void OnFirstRunContinueClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
         void OnPortLostFocus(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
         void OnAudioToggled(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
         void OnTolerantToggled(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
@@ -67,8 +71,10 @@ namespace winrt::UwpSmokeTestCpp::implementation
         void UpdateAutoHide(rx::ConnectionState state);
         void ShowPanel(bool show);
         void SetDiagnosticsVisible(bool visible);
+        void ShowFirstRun(bool show);
         void StopPocs();
         bool PanelVisible();
+        bool FirstRunVisible();
 
         rx::ReceiverSettings m_settings;
         Windows::Media::Playback::MediaPlayer m_player{ nullptr };
@@ -92,10 +98,12 @@ namespace winrt::UwpSmokeTestCpp::implementation
         rx::Clock::time_point m_lastInput{};
         rx::Clock::time_point m_receivingSince{};
 
+#ifdef _DEBUG
         std::shared_ptr<rx::PocSocketCounter> m_pocSockets;
         std::shared_ptr<rx::PocClipPlayer> m_pocClip;
         std::shared_ptr<rx::PocToneTest> m_pocTone;
         size_t m_toneStep = 0;
+#endif
 
         Windows::UI::Xaml::DispatcherTimer::Tick_revoker m_tickRevoker;
         Windows::UI::Xaml::Application::Suspending_revoker m_suspendingRevoker;

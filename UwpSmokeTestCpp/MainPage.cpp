@@ -7,9 +7,11 @@
 #include <cwchar>
 #include <string>
 
+#include "VideoPresenter.h"
+#ifdef _DEBUG
 #include "PocSpikes.h"
 #include "SelfTest.h"
-#include "VideoPresenter.h"
+#endif
 
 using namespace winrt;
 using namespace winrt::Windows::ApplicationModel;
@@ -49,6 +51,50 @@ namespace
         case ConnectionState::Error: return { 255, 244, 67, 54 };
         default: return { 255, 128, 128, 128 };
         }
+    }
+
+    wchar_t const* StatusTitle(ConnectionState state)
+    {
+        switch (state)
+        {
+        case ConnectionState::Stopped: return L"Stopped";
+        case ConnectionState::Starting: return L"Starting";
+        case ConnectionState::Waiting: return L"Waiting for media";
+        case ConnectionState::Receiving: return L"Receiving";
+        case ConnectionState::Reconnecting: return L"Reconnecting";
+        case ConnectionState::Error: return L"Playback problem";
+        case ConnectionState::Stopping: return L"Stopping";
+        default: return L"Stopped";
+        }
+    }
+
+    std::wstring FormatUserError(hstring const& raw)
+    {
+        if (raw.empty())
+        {
+            return {};
+        }
+        std::wstring text = raw.c_str();
+        if (text.find(L"HEVC") != std::wstring::npos || text.find(L"H.265") != std::wstring::npos ||
+            text.find(L"h265") != std::wstring::npos)
+        {
+            return L"This receiver accepts H.264 video only. Configure the companion server to send H.264 (for UxPlay, do not use -h265).";
+        }
+        return text;
+    }
+
+    std::wstring FormatAudioStatus(hstring const& raw)
+    {
+        if (raw.empty())
+        {
+            return {};
+        }
+        std::wstring text = raw.c_str();
+        if (text == L"Audio disabled")
+        {
+            return L"Audio is turned off in settings.";
+        }
+        return L"Audio: " + text;
     }
 
     int32_t ParsePort(hstring const& text)
@@ -99,6 +145,11 @@ namespace winrt::UwpSmokeTestCpp::implementation
 #ifdef _DEBUG
         DebugToolsPanel().Visibility(Visibility::Visible);
 #endif
+        ShowFirstRun(!m_settings.firstRunDismissed);
+        if (!FirstRunVisible())
+        {
+            ShowPanel(true);
+        }
 
         m_uiTimer = DispatcherTimer();
         m_uiTimer.Interval(std::chrono::milliseconds(250));
@@ -166,7 +217,14 @@ namespace winrt::UwpSmokeTestCpp::implementation
 
     void MainPage::OnLoaded(IInspectable const&, RoutedEventArgs const&)
     {
-        StartButton().Focus(FocusState::Programmatic);
+        if (FirstRunVisible())
+        {
+            FirstRunContinueButton().Focus(FocusState::Programmatic);
+        }
+        else if (PanelVisible())
+        {
+            StartButton().Focus(FocusState::Programmatic);
+        }
     }
 
     void MainPage::LoadSettingsIntoUi()
@@ -271,6 +329,21 @@ namespace winrt::UwpSmokeTestCpp::implementation
         SetDiagnosticsVisible(DiagnosticsPanel().Visibility() != Visibility::Visible);
     }
 
+    void MainPage::OnHelpClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        m_lastInput = rx::Clock::now();
+        ShowFirstRun(true);
+    }
+
+    void MainPage::OnFirstRunContinueClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        m_settings.firstRunDismissed = true;
+        m_settings.Save();
+        ShowFirstRun(false);
+        ShowPanel(true);
+        StartButton().Focus(FocusState::Programmatic);
+    }
+
     void MainPage::OnPortLostFocus(IInspectable const&, RoutedEventArgs const&)
     {
         if (ReadPortsFromUi())
@@ -337,27 +410,38 @@ namespace winrt::UwpSmokeTestCpp::implementation
 
     void MainPage::OnSelfTestClick(IInspectable const&, RoutedEventArgs const&)
     {
+#ifdef _DEBUG
         m_selfTestSummary = rx::RunSelfTests().summary;
         SetDiagnosticsVisible(true);
+#endif
     }
 
     void MainPage::OnPocSocketsClick(IInspectable const&, RoutedEventArgs const&)
     {
+#ifdef _DEBUG
         TogglePocSocketsAsync();
+#endif
     }
 
     void MainPage::OnPocClipClick(IInspectable const&, RoutedEventArgs const&)
     {
+#ifdef _DEBUG
         TogglePocClipAsync();
+#endif
     }
 
     void MainPage::OnPocToneClick(IInspectable const&, RoutedEventArgs const&)
     {
+#ifdef _DEBUG
         TogglePocToneAsync();
+#endif
     }
 
     fire_and_forget MainPage::TogglePocSocketsAsync()
     {
+#ifndef _DEBUG
+        co_return;
+#else
         auto strong = get_strong();
         if (m_pocSockets)
         {
@@ -377,10 +461,14 @@ namespace winrt::UwpSmokeTestCpp::implementation
         m_pocSockets = poc;
         SetDiagnosticsVisible(true);
         co_await poc->StartAsync(static_cast<uint16_t>(m_settings.videoPort), static_cast<uint16_t>(m_settings.audioPort));
+#endif
     }
 
     fire_and_forget MainPage::TogglePocClipAsync()
     {
+#ifndef _DEBUG
+        co_return;
+#else
         auto strong = get_strong();
         if (m_pocClip)
         {
@@ -403,10 +491,14 @@ namespace winrt::UwpSmokeTestCpp::implementation
         {
             m_uiMessage = L"PoC clip failed: " + e.message();
         }
+#endif
     }
 
     fire_and_forget MainPage::TogglePocToneAsync()
     {
+#ifndef _DEBUG
+        co_return;
+#else
         // Each press advances through the tone test matrix; the press after the last test stops
         // and leaves its final numbers on screen.
         auto strong = get_strong();
@@ -430,10 +522,14 @@ namespace winrt::UwpSmokeTestCpp::implementation
         m_pocTone = poc;
         SetDiagnosticsVisible(true);
         co_await poc->StartAsync(rx::PocToneTest::TestConfig(index), index);
+#endif
     }
 
     void MainPage::StopPocs()
     {
+#ifndef _DEBUG
+        return;
+#else
         if (m_pocSockets)
         {
             m_pocSockets->Stop();
@@ -450,6 +546,7 @@ namespace winrt::UwpSmokeTestCpp::implementation
             m_pocTone.reset();
         }
         m_toneStep = 0;
+#endif
     }
 
     // The app's only suspend cleanup (App::OnSuspending is intentionally empty). Every step is a
@@ -489,6 +586,10 @@ namespace winrt::UwpSmokeTestCpp::implementation
     {
         m_lastInput = rx::Clock::now();
         VirtualKey const key = args.VirtualKey();
+        if (FirstRunVisible())
+        {
+            return;
+        }
         if (key == VirtualKey::GamepadMenu)
         {
             ShowPanel(!PanelVisible());
@@ -522,8 +623,28 @@ namespace winrt::UwpSmokeTestCpp::implementation
         return ControlPanel().Visibility() == Visibility::Visible;
     }
 
+    bool MainPage::FirstRunVisible()
+    {
+        return FirstRunPanel().Visibility() == Visibility::Visible;
+    }
+
+    void MainPage::ShowFirstRun(bool show)
+    {
+        FirstRunPanel().Visibility(show ? Visibility::Visible : Visibility::Collapsed);
+        ControlPanel().IsHitTestVisible(!show);
+        DiagnosticsPanel().IsHitTestVisible(false);
+        if (show)
+        {
+            FirstRunContinueButton().Focus(FocusState::Programmatic);
+        }
+    }
+
     void MainPage::ShowPanel(bool show)
     {
+        if (FirstRunVisible())
+        {
+            show = false;
+        }
         ControlPanel().Visibility(show ? Visibility::Visible : Visibility::Collapsed);
         if (show)
         {
@@ -566,10 +687,12 @@ namespace winrt::UwpSmokeTestCpp::implementation
             return;
         }
         m_session->OnUiTick();
+#ifdef _DEBUG
         if (m_pocClip)
         {
             m_pocClip->OnUiTick();
         }
+#endif
 
         auto const now = rx::Clock::now();
         auto const snapshot = m_session->Stats()->Take();
@@ -601,29 +724,38 @@ namespace winrt::UwpSmokeTestCpp::implementation
 
     void MainPage::UpdateStatus(ConnectionState state, rx::ReceiverStats::Snapshot const& snapshot)
     {
-        StatusText().Text(rx::ToString(state));
+        StatusText().Text(StatusTitle(state));
         StatusDot().Fill(SolidColorBrush(StateColor(state)));
 
         std::wstring detail;
         switch (state)
         {
+        case ConnectionState::Stopped:
+            detail = L"Press Start to listen for video and audio on your local network.";
+            break;
+        case ConnectionState::Starting:
+            detail = L"Opening listeners and preparing playback.";
+            break;
         case ConnectionState::Waiting:
-            Append(detail, L"Listening on UDP %d (video)", m_settings.videoPort);
+            Append(detail, L"Start your companion server on the same network, then connect from that device. Listening on UDP %d (video)", m_settings.videoPort);
             if (m_settings.audioEnabled)
             {
                 Append(detail, L" and %d (audio)", m_settings.audioPort);
             }
+            detail += L".";
             break;
         case ConnectionState::Receiving:
-            Append(detail, L"%lldx%lld  %.1f fps  %.1f Mbps", rx::At(snapshot, Stat::Width), rx::At(snapshot, Stat::Height), m_fps, m_videoMbps);
+            Append(detail, L"%lld×%lld at %.1f fps (%.1f Mbps).", rx::At(snapshot, Stat::Width), rx::At(snapshot, Stat::Height), m_fps, m_videoMbps);
             if (rx::At(snapshot, Stat::WaitingForKeyframe))
             {
-                detail += L"  (holding picture until the next keyframe)";
+                detail += L" Showing the last good picture until video resumes.";
             }
             break;
         case ConnectionState::Reconnecting:
-            Append(detail, L"No audio or video for %d s; waiting for UxPlay",
-                std::max(m_settings.idleTimeoutMs, rx::ReceiverSettings::kMinIdleTimeoutMs) / 1000);
+            detail = L"No new video or audio has arrived for a while. Waiting for media to resume.";
+            break;
+        case ConnectionState::Error:
+            detail = L"Check the companion server and network, then press Stop and Start to try again.";
             break;
         default:
             break;
@@ -634,14 +766,22 @@ namespace winrt::UwpSmokeTestCpp::implementation
             hstring const error = m_session->ErrorMessage();
             if (!error.empty())
             {
-                if (!detail.empty()) detail += L"\n";
-                detail += error.c_str();
+                std::wstring const friendly = FormatUserError(error);
+                if (!friendly.empty())
+                {
+                    if (!detail.empty()) detail += L"\n";
+                    detail += friendly;
+                }
             }
             hstring const audio = m_session->AudioStatus();
             if (!audio.empty() && m_session->IsActive())
             {
-                if (!detail.empty()) detail += L"\n";
-                detail += audio.c_str();
+                std::wstring const audioLine = FormatAudioStatus(audio);
+                if (!audioLine.empty())
+                {
+                    if (!detail.empty()) detail += L"\n";
+                    detail += audioLine;
+                }
             }
         }
         if (!m_uiMessage.empty())
@@ -658,65 +798,77 @@ namespace winrt::UwpSmokeTestCpp::implementation
     {
         auto at = [&](Stat stat) { return rx::At(s, stat); };
         std::wstring text;
-
-        Append(text, L"VIDEO  %lldx%lld  profile %lld level %.1f  %.1f fps  %.2f Mbps\n",
-            at(Stat::Width), at(Stat::Height), at(Stat::Profile), at(Stat::Level) / 10.0, m_fps, m_videoMbps);
-        Append(text, L"  rtp  ssrc %08llx  seq %lld  ts %lld  jitter %.2f ms\n",
-            at(Stat::VideoSsrc), at(Stat::VideoLastSequence), at(Stat::VideoLastTimestamp), at(Stat::VideoJitterUs) / 1000.0);
-        Append(text, L"  packets %lld  gaps %lld (lost %lld)  dup %lld  reordered %lld  late %lld\n",
-            at(Stat::VideoPackets), at(Stat::VideoSequenceGaps), at(Stat::VideoLost), at(Stat::VideoDuplicate),
-            at(Stat::VideoReordered), at(Stat::VideoLate));
-        Append(text, L"  invalid %lld  wrong pt %lld  ignored %lld  resync %lld  oversize %lld  socket err %lld\n",
-            at(Stat::VideoInvalid), at(Stat::VideoWrongPayloadType), at(Stat::VideoForeignSsrc), at(Stat::VideoOutOfWindow),
-            at(Stat::VideoTooLarge), at(Stat::VideoSocketErrors));
-        Append(text, L"  AU complete %lld  incomplete %lld (no marker %lld)  discarded %lld  IDR %lld (interval %lld ms)\n",
-            at(Stat::AccessUnitsComplete), at(Stat::AccessUnitsIncomplete), at(Stat::AccessUnitsMissingMarker),
-            at(Stat::AccessUnitsDiscarded), at(Stat::IdrCount), at(Stat::IdrIntervalMs));
-        Append(text, L"  bad FU-A %lld  bad STAP-A %lld  unsupported NAL %lld  malformed %lld\n",
-            at(Stat::FuaErrors), at(Stat::StapaErrors), at(Stat::UnsupportedNal), at(Stat::MalformedPayload));
-        Append(text, L"  dropped  incomplete %lld  awaiting IDR %lld  non-ref %lld  stale %lld  playing-full %lld  startup-full %lld%s\n",
-            at(Stat::DropIncomplete), at(Stat::DropAwaitingIdr), at(Stat::DropNonRef), at(Stat::DropStale),
-            at(Stat::DropQueueFull), at(Stat::DropStartupFull), at(Stat::WaitingForKeyframe) ? L"  [AWAITING IDR]" : L"");
         static wchar_t const* const kPhases[] = { L"none", L"opening", L"starting", L"playing" };
         int64_t const phase = at(Stat::DeliveryPhase);
-        Append(text, L"  delivery %s  startup peak %lld frames  IDR waits: network %lld  back-pressure %lld\n",
-            phase >= 0 && phase < 4 ? kPhases[phase] : L"?", at(Stat::StartupPeakFrames),
-            at(Stat::IdrWaitsNetwork), at(Stat::IdrWaitsBackpressure));
-        Append(text, L"  submitted %lld (%.1f fps)  queue %lld  pts discont %lld  sample err %lld\n",
-            at(Stat::FramesSubmitted), m_fps, at(Stat::FrameQueueDepth),
-            at(Stat::PtsDiscontinuities), at(Stat::SampleErrors));
-        Append(text, L"  requests %lld  deferred %lld  pending %lld  overlapping %lld  last request %lld ms ago  ended %lld\n",
+
+        text += L"— Stream / source —\n";
+        Append(text, L"%lld×%lld  profile %lld  level %.1f  %.1f fps  %.2f Mbps\n",
+            at(Stat::Width), at(Stat::Height), at(Stat::Profile), at(Stat::Level) / 10.0, m_fps, m_videoMbps);
+        Append(text, L"real-time %s  sources built %lld  stream restarts %lld\n",
+            at(Stat::RealTimePlayback) ? L"on" : L"off", at(Stat::SourceBuilds), at(Stat::VideoStreamRestarts));
+
+        text += L"\n— Network / RTP —\n";
+        Append(text, L"packets %lld  gaps %lld (lost %lld)  dup %lld  reordered %lld  late %lld\n",
+            at(Stat::VideoPackets), at(Stat::VideoSequenceGaps), at(Stat::VideoLost), at(Stat::VideoDuplicate),
+            at(Stat::VideoReordered), at(Stat::VideoLate));
+        Append(text, L"invalid %lld  wrong PT %lld  foreign SSRC %lld  out-of-window %lld  oversize %lld  socket err %lld\n",
+            at(Stat::VideoInvalid), at(Stat::VideoWrongPayloadType), at(Stat::VideoForeignSsrc), at(Stat::VideoOutOfWindow),
+            at(Stat::VideoTooLarge), at(Stat::VideoSocketErrors));
+        Append(text, L"seq %lld  ts %lld  jitter %.2f ms\n",
+            at(Stat::VideoLastSequence), at(Stat::VideoLastTimestamp), at(Stat::VideoJitterUs) / 1000.0);
+
+        text += L"\n— H.264 parser & recovery —\n";
+        Append(text, L"AU complete %lld  incomplete %lld (no marker %lld)  discarded %lld  IDR %lld (interval %lld ms)\n",
+            at(Stat::AccessUnitsComplete), at(Stat::AccessUnitsIncomplete), at(Stat::AccessUnitsMissingMarker),
+            at(Stat::AccessUnitsDiscarded), at(Stat::IdrCount), at(Stat::IdrIntervalMs));
+        Append(text, L"FU-A err %lld  STAP-A err %lld  unsupported NAL %lld  malformed %lld\n",
+            at(Stat::FuaErrors), at(Stat::StapaErrors), at(Stat::UnsupportedNal), at(Stat::MalformedPayload));
+        Append(text, L"dropped incomplete %lld  network-damage IDR wait %lld  back-pressure IDR wait %lld  non-ref %lld  stale %lld\n",
+            at(Stat::DropIncomplete), at(Stat::IdrWaitsNetwork), at(Stat::IdrWaitsBackpressure), at(Stat::DropNonRef), at(Stat::DropStale));
+        Append(text, L"queue-full drops %lld  startup-full %lld  awaiting keyframe %s\n",
+            at(Stat::DropQueueFull), at(Stat::DropStartupFull), at(Stat::WaitingForKeyframe) ? L"yes" : L"no");
+
+        text += L"\n— Decoder / presentation —\n";
+        Append(text, L"delivery %s  startup peak %lld frames\n",
+            phase >= 0 && phase < 4 ? kPhases[phase] : L"?", at(Stat::StartupPeakFrames));
+        Append(text, L"submitted %lld  queue depth %lld  pts discontinuities %lld  sample errors %lld\n",
+            at(Stat::FramesSubmitted), at(Stat::FrameQueueDepth), at(Stat::PtsDiscontinuities), at(Stat::SampleErrors));
+        Append(text, L"requests %lld  deferred %lld  pending %lld  overlapping %lld  last request %lld ms ago\n",
             at(Stat::SampleRequests), at(Stat::SampleDeferrals), at(Stat::PendingRequests), at(Stat::OverlappingRequests),
-            at(Stat::LastRequestAgeMs), at(Stat::EndOfStreamCompletions));
-        Append(text, L"  processed %lld  unprocessed %lld  rendered %lld\n",
-            at(Stat::SamplesProcessed), at(Stat::SamplesInFlight), at(Stat::SamplesRendered));
-        Append(text, L"  recv->submit p50 %.1f / p95 %.1f ms  sample lag %.1f ms  pts lead %.1f ms\n",
+            at(Stat::LastRequestAgeMs));
+        Append(text, L"processed %lld  in flight %lld  rendered %lld  decoder failures %lld\n",
+            at(Stat::SamplesProcessed), at(Stat::SamplesInFlight), at(Stat::SamplesRendered), at(Stat::MediaFailures));
+        Append(text, L"recv→submit p50 %.1f / p95 %.1f ms  sample lag %.1f ms  pts lead %.1f ms\n",
             at(Stat::ReceiveToSubmitP50Us) / 1000.0, at(Stat::ReceiveToSubmitP95Us) / 1000.0,
             at(Stat::SampleLagUs) / 1000.0, at(Stat::PtsLeadUs) / 1000.0);
-        Append(text, L"  real-time %s  poc type %lld  restriction %s (max dec buf %lld)  sources %lld  decoder errors %lld  restarts %lld\n",
-            at(Stat::RealTimePlayback) ? L"on" : L"off", at(Stat::PocType), at(Stat::BitstreamRestriction) ? L"yes" : L"no",
-            at(Stat::MaxDecFrameBuffering), at(Stat::SourceBuilds), at(Stat::MediaFailures), at(Stat::VideoStreamRestarts));
+        Append(text, L"bitstream restriction %s (max dec buf %lld)\n",
+            at(Stat::BitstreamRestriction) ? L"yes" : L"no", at(Stat::MaxDecFrameBuffering));
 
+        text += L"\n— Audio —\n";
         if (m_settings.audioEnabled)
         {
-            Append(text, L"AUDIO  %s  graph %lld Hz  quantum %lld  resampler %s  output %.1f ms  %.0f kbps\n",
+            Append(text, L"%s  graph %lld Hz  quantum %lld  resampler %s  output %.1f ms  %.0f kbps\n",
                 at(Stat::AudioRunning) ? L"running" : L"not running", at(Stat::AudioGraphRate), at(Stat::AudioQuantumSamples),
-                at(Stat::AudioResamplerActive) ? L"44.1k->graph" : L"no", at(Stat::AudioOutputLatencyUs) / 1000.0, m_audioKbps);
-            Append(text, L"  packets %lld  lost %lld  dup %lld  reordered %lld  late %lld  invalid %lld  restarts %lld\n",
+                at(Stat::AudioResamplerActive) ? L"44.1k→graph" : L"no", at(Stat::AudioOutputLatencyUs) / 1000.0, m_audioKbps);
+            Append(text, L"packets %lld  lost %lld  dup %lld  reordered %lld  late %lld  invalid %lld  restarts %lld\n",
                 at(Stat::AudioPackets), at(Stat::AudioLost), at(Stat::AudioDuplicate), at(Stat::AudioReordered),
                 at(Stat::AudioLate), at(Stat::AudioInvalid) + at(Stat::AudioWrongPayloadType), at(Stat::AudioStreamRestarts));
-            Append(text, L"  buffer %.1f ms  target %lld ms  drift %lld ppm  jitter %.2f ms\n",
+            Append(text, L"buffer %.1f ms  target %lld ms  drift %lld ppm  jitter %.2f ms\n",
                 at(Stat::AudioFillUs) / 1000.0, at(Stat::AudioTargetDelayMs), at(Stat::AudioDriftPpm), at(Stat::AudioJitterUs) / 1000.0);
-            Append(text, L"  underruns %lld  concealed %.0f ms  overflow %lld  hard-cap drops %lld  gaps %lld  callback err %lld  graph err %lld",
+            Append(text, L"underruns %lld  concealed %.0f ms  overflow %lld  hard-cap drops %lld  gaps %lld  callback err %lld  graph err %lld",
                 at(Stat::AudioUnderruns), at(Stat::AudioConcealedFrames) / 44.1, at(Stat::AudioOverflowFrames),
                 at(Stat::AudioHardCapDropFrames), at(Stat::AudioDiscontinuities), at(Stat::AudioCallbackErrors),
                 at(Stat::AudioGraphErrors));
         }
         else
         {
-            text += L"AUDIO  disabled";
+            text += L"disabled in settings";
         }
 
+        text += L"\n\n— Lifecycle —\n";
+        Append(text, L"end-of-stream completions %lld\n", at(Stat::EndOfStreamCompletions));
+
+#ifdef _DEBUG
         if (!m_selfTestSummary.empty())
         {
             text += L"\n";
@@ -737,14 +889,18 @@ namespace winrt::UwpSmokeTestCpp::implementation
             text += L"\n";
             text += m_pocTone->Status().c_str();
         }
+#endif
 
         DiagnosticsText().Text(text);
     }
 
     void MainPage::UpdateDisplayRequest(ConnectionState state)
     {
-        bool const wantActive = state == ConnectionState::Waiting || state == ConnectionState::Receiving ||
-                                state == ConnectionState::Reconnecting || m_pocClip != nullptr;
+        bool wantActive = state == ConnectionState::Waiting || state == ConnectionState::Receiving ||
+                          state == ConnectionState::Reconnecting;
+#ifdef _DEBUG
+        wantActive = wantActive || static_cast<bool>(m_pocClip);
+#endif
         if (wantActive == m_displayRequestActive)
         {
             return;

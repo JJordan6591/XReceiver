@@ -115,6 +115,32 @@ namespace rx
         AudioCallbackErrors,
         AudioGraphErrors,
 
+        // Session health. Ages are -1 when the event has not happened or the clock sample is invalid.
+        // Receive-to-submit percentiles are not display latency.
+        FrameQueueBytes,
+        FrameQueueFramesHigh,
+        FrameQueueBytesHigh,
+        VideoAccepted,
+        VideoAcceptedBytes,
+        AudioAccepted,
+        AudioAcceptedBytes,
+        VideoPacketAgeMs,
+        VideoSubmitAgeMs,
+        IdrWaitCurrentMs,
+        IdrWaitLongestMs,
+        StallCount,
+        StallCurrentMs,
+        StallLongestMs,
+        AudioFillHighUs,
+        AudioUnderrunLongestUs,
+        AudioCallbackUs,
+        AudioCallbackOverruns,
+        SessionUptimeMs,
+        StateAgeMs,
+        HealthFlags,
+        AppMemoryBytes,
+        AppMemoryHighBytes,
+
         Count
     };
 
@@ -151,6 +177,20 @@ namespace rx
             }
         }
         void Set(Stat s, int64_t value) { m_values[Index(s)].store(value, std::memory_order_relaxed); }
+
+        // Monotonic peak. Safe to call from the audio quantum; it only touches one atomic.
+        void Raise(Stat s, int64_t value)
+        {
+            if (value < 0)
+            {
+                return;
+            }
+            auto& slot = m_values[Index(s)];
+            int64_t current = slot.load(std::memory_order_relaxed);
+            while (value > current && !slot.compare_exchange_weak(current, value, std::memory_order_relaxed))
+            {
+            }
+        }
         int64_t Get(Stat s) const { return m_values[Index(s)].load(std::memory_order_relaxed); }
 
         Snapshot Take() const

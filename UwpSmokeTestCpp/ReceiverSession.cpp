@@ -99,6 +99,7 @@ namespace rx
         m_settings.Sanitize();
         m_avOffsetMs = m_settings.avOffsetMs;
         m_stats->Reset();
+        m_health.Reset(Clock::now());
         m_mediaFailures.clear();
         SetError(L"");
         SetAudioStatus(L"");
@@ -485,10 +486,12 @@ namespace rx
     void ReceiverSession::OnUiTick()
     {
         std::shared_ptr<VideoReceiver> video;
+        std::shared_ptr<AudioReceiver> audio;
         std::shared_ptr<AudioPresenter> audioPresenter;
         {
             std::lock_guard<std::mutex> lock(m_componentsLock);
             video = m_video;
+            audio = m_audio;
             audioPresenter = m_audioPresenter;
         }
 
@@ -508,6 +511,59 @@ namespace rx
             inputs.minDelayMs = m_settings.audioMinDelayMs;
             inputs.maxDelayMs = m_settings.audioMaxDelayMs;
             audioPresenter->SetTargetDelayMs(ComputeAudioTargetDelayMs(inputs));
+        }
+
+        UpdateSessionHealth(Clock::now(), video.get(), audio.get());
+    }
+
+    void ReceiverSession::UpdateSessionHealth(Clock::time_point now, VideoReceiver* video, AudioReceiver* audio)
+    {
+        HealthObservation obs;
+        ConnectionState const state = m_state.load();
+        obs.state = static_cast<int>(state);
+        obs.receiving = state == ConnectionState::Receiving;
+        obs.audioEnabled = m_settings.audioEnabled;
+        obs.queueFrames = m_stats->Get(Stat::FrameQueueDepth);
+        obs.queueFramesHigh = m_stats->Get(Stat::FrameQueueFramesHigh);
+        obs.idrWaitMs = m_stats->Get(Stat::IdrWaitCurrentMs);
+        obs.sourceBuilds = m_stats->Get(Stat::SourceBuilds);
+        obs.discontinuities = m_stats->Get(Stat::PtsDiscontinuities);
+        obs.audioFillUs = m_stats->Get(Stat::AudioFillUs);
+        obs.audioTargetMs = m_stats->Get(Stat::AudioTargetDelayMs);
+        if (video)
+        {
+            VideoActivity const activity = video->Activity();
+            obs.videoEver = activity.everReceived;
+            obs.videoLast = activity.lastPacket;
+            obs.submitEver = activity.everSubmitted;
+            obs.submitLast = activity.lastSubmit;
+            obs.waitingForIdr = activity.waitingForKeyframe;
+        }
+        if (audio)
+        {
+            obs.audioEver = audio->EverReceived();
+            obs.audioLast = audio->LastPacketTime();
+        }
+        m_health.Update(obs, now);
+        int64_t const uptime = m_health.UptimeMs(now);
+        int64_t const stateAge = m_health.StateAgeMs(now);
+        m_stats->Set(Stat::SessionUptimeMs, uptime < 0 ? 0 : uptime);
+        m_stats->Set(Stat::StateAgeMs, stateAge < 0 ? 0 : stateAge);
+        m_stats->Set(Stat::StallCount, m_health.Stall().Starts());
+        m_stats->Set(Stat::StallCurrentMs, m_health.Stall().CurrentMs());
+        m_stats->Set(Stat::StallLongestMs, m_health.Stall().LongestMs());
+        m_stats->Set(Stat::HealthFlags, static_cast<int64_t>(m_health.Flags()));
+
+        try
+        {
+            uint64_t const usage = winrt::Windows::System::MemoryManager::AppMemoryUsage();
+            int64_t const bytes = usage > static_cast<uint64_t>(INT64_MAX) ? INT64_MAX : static_cast<int64_t>(usage);
+            m_stats->Set(Stat::AppMemoryBytes, bytes);
+            m_stats->Raise(Stat::AppMemoryHighBytes, bytes);
+        }
+        catch (winrt::hresult_error const&)
+        {
+            m_stats->Set(Stat::AppMemoryBytes, -1);
         }
     }
 

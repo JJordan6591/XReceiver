@@ -182,6 +182,8 @@ namespace rx
         }
 
         // Rejected datagrams must not keep the session in Receiving or reset the idle timer.
+        m_stats->Add(Stat::AudioAccepted);
+        m_stats->Add(Stat::AudioAcceptedBytes, static_cast<int64_t>(size));
         m_lastPacketTicks = now.time_since_epoch().count();
         m_everReceived = true;
 

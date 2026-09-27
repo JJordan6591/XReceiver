@@ -801,11 +801,21 @@ namespace winrt::UwpSmokeTestCpp::implementation
         static wchar_t const* const kPhases[] = { L"none", L"opening", L"starting", L"playing" };
         int64_t const phase = at(Stat::DeliveryPhase);
 
-        text += L"— Stream / source —\n";
+        wchar_t health[96] = {};
+        rx::FormatHealth(static_cast<uint32_t>(at(Stat::HealthFlags)), health, 96);
+        text += L"— Session —\n";
+        Append(text, L"health %s  uptime %lld s  this state %lld s\n",
+            health, at(Stat::SessionUptimeMs) / 1000, at(Stat::StateAgeMs) / 1000);
+        Append(text, L"memory %lld KB  peak %lld KB  stalls %lld  now %lld ms  longest %lld ms\n",
+            at(Stat::AppMemoryBytes) < 0 ? int64_t{ -1 } : at(Stat::AppMemoryBytes) / 1024,
+            at(Stat::AppMemoryHighBytes) / 1024, at(Stat::StallCount), at(Stat::StallCurrentMs), at(Stat::StallLongestMs));
+
+        text += L"\n— Stream / source —\n";
         Append(text, L"%lld×%lld  profile %lld  level %.1f  %.1f fps  %.2f Mbps\n",
             at(Stat::Width), at(Stat::Height), at(Stat::Profile), at(Stat::Level) / 10.0, m_fps, m_videoMbps);
-        Append(text, L"real-time %s  sources built %lld  stream restarts %lld\n",
-            at(Stat::RealTimePlayback) ? L"on" : L"off", at(Stat::SourceBuilds), at(Stat::VideoStreamRestarts));
+        Append(text, L"real-time %s  sources %lld  sender changes %lld  accepted pkts %lld\n",
+            at(Stat::RealTimePlayback) ? L"on" : L"off", at(Stat::SourceBuilds), at(Stat::VideoStreamRestarts),
+            at(Stat::VideoAccepted));
 
         text += L"\n— Network / RTP —\n";
         Append(text, L"packets %lld  gaps %lld (lost %lld)  dup %lld  reordered %lld  late %lld\n",
@@ -814,8 +824,9 @@ namespace winrt::UwpSmokeTestCpp::implementation
         Append(text, L"invalid %lld  wrong PT %lld  foreign SSRC %lld  out-of-window %lld  oversize %lld  socket err %lld\n",
             at(Stat::VideoInvalid), at(Stat::VideoWrongPayloadType), at(Stat::VideoForeignSsrc), at(Stat::VideoOutOfWindow),
             at(Stat::VideoTooLarge), at(Stat::VideoSocketErrors));
-        Append(text, L"seq %lld  ts %lld  jitter %.2f ms\n",
-            at(Stat::VideoLastSequence), at(Stat::VideoLastTimestamp), at(Stat::VideoJitterUs) / 1000.0);
+        Append(text, L"seq %lld  ts %lld  jitter %.2f ms  last packet %lld ms  last submit %lld ms\n",
+            at(Stat::VideoLastSequence), at(Stat::VideoLastTimestamp), at(Stat::VideoJitterUs) / 1000.0,
+            at(Stat::VideoPacketAgeMs), at(Stat::VideoSubmitAgeMs));
 
         text += L"\n— H.264 parser & recovery —\n";
         Append(text, L"AU complete %lld  incomplete %lld (no marker %lld)  discarded %lld  IDR %lld (interval %lld ms)\n",
@@ -825,14 +836,18 @@ namespace winrt::UwpSmokeTestCpp::implementation
             at(Stat::FuaErrors), at(Stat::StapaErrors), at(Stat::UnsupportedNal), at(Stat::MalformedPayload));
         Append(text, L"dropped incomplete %lld  network-damage IDR wait %lld  back-pressure IDR wait %lld  non-ref %lld  stale %lld\n",
             at(Stat::DropIncomplete), at(Stat::IdrWaitsNetwork), at(Stat::IdrWaitsBackpressure), at(Stat::DropNonRef), at(Stat::DropStale));
-        Append(text, L"queue-full drops %lld  startup-full %lld  awaiting keyframe %s\n",
-            at(Stat::DropQueueFull), at(Stat::DropStartupFull), at(Stat::WaitingForKeyframe) ? L"yes" : L"no");
+        Append(text, L"queue-full %lld  startup-full %lld  awaiting keyframe %s  wait %lld ms (longest %lld)\n",
+            at(Stat::DropQueueFull), at(Stat::DropStartupFull), at(Stat::WaitingForKeyframe) ? L"yes" : L"no",
+            at(Stat::IdrWaitCurrentMs), at(Stat::IdrWaitLongestMs));
 
         text += L"\n— Decoder / presentation —\n";
         Append(text, L"delivery %s  startup peak %lld frames\n",
             phase >= 0 && phase < 4 ? kPhases[phase] : L"?", at(Stat::StartupPeakFrames));
-        Append(text, L"submitted %lld  queue depth %lld  pts discontinuities %lld  sample errors %lld\n",
-            at(Stat::FramesSubmitted), at(Stat::FrameQueueDepth), at(Stat::PtsDiscontinuities), at(Stat::SampleErrors));
+        Append(text, L"submitted %lld  queue %lld frames / %lld KB  peak %lld frames / %lld KB\n",
+            at(Stat::FramesSubmitted), at(Stat::FrameQueueDepth), at(Stat::FrameQueueBytes) / 1024,
+            at(Stat::FrameQueueFramesHigh), at(Stat::FrameQueueBytesHigh) / 1024);
+        Append(text, L"pts jumps %lld  sample errors %lld  recv→submit is not display latency\n",
+            at(Stat::PtsDiscontinuities), at(Stat::SampleErrors));
         Append(text, L"requests %lld  deferred %lld  pending %lld  overlapping %lld  last request %lld ms ago\n",
             at(Stat::SampleRequests), at(Stat::SampleDeferrals), at(Stat::PendingRequests), at(Stat::OverlappingRequests),
             at(Stat::LastRequestAgeMs));
@@ -853,12 +868,15 @@ namespace winrt::UwpSmokeTestCpp::implementation
             Append(text, L"packets %lld  lost %lld  dup %lld  reordered %lld  late %lld  invalid %lld  restarts %lld\n",
                 at(Stat::AudioPackets), at(Stat::AudioLost), at(Stat::AudioDuplicate), at(Stat::AudioReordered),
                 at(Stat::AudioLate), at(Stat::AudioInvalid) + at(Stat::AudioWrongPayloadType), at(Stat::AudioStreamRestarts));
-            Append(text, L"buffer %.1f ms  target %lld ms  drift %lld ppm  jitter %.2f ms\n",
-                at(Stat::AudioFillUs) / 1000.0, at(Stat::AudioTargetDelayMs), at(Stat::AudioDriftPpm), at(Stat::AudioJitterUs) / 1000.0);
-            Append(text, L"underruns %lld  concealed %.0f ms  overflow %lld  hard-cap drops %lld  gaps %lld  callback err %lld  graph err %lld",
-                at(Stat::AudioUnderruns), at(Stat::AudioConcealedFrames) / 44.1, at(Stat::AudioOverflowFrames),
-                at(Stat::AudioHardCapDropFrames), at(Stat::AudioDiscontinuities), at(Stat::AudioCallbackErrors),
-                at(Stat::AudioGraphErrors));
+            Append(text, L"buffer %.1f ms (peak %.1f)  target %lld ms  drift %lld ppm  jitter %.2f ms\n",
+                at(Stat::AudioFillUs) / 1000.0, at(Stat::AudioFillHighUs) / 1000.0, at(Stat::AudioTargetDelayMs),
+                at(Stat::AudioDriftPpm), at(Stat::AudioJitterUs) / 1000.0);
+            Append(text, L"underruns %lld  longest %.1f ms  concealed %.0f ms  overflow %lld  hard-cap %lld\n",
+                at(Stat::AudioUnderruns), at(Stat::AudioUnderrunLongestUs) / 1000.0, at(Stat::AudioConcealedFrames) / 44.1,
+                at(Stat::AudioOverflowFrames), at(Stat::AudioHardCapDropFrames));
+            Append(text, L"gaps %lld  callback %lld us (overruns %lld)  callback err %lld  graph err %lld  accepted %lld",
+                at(Stat::AudioDiscontinuities), at(Stat::AudioCallbackUs), at(Stat::AudioCallbackOverruns),
+                at(Stat::AudioCallbackErrors), at(Stat::AudioGraphErrors), at(Stat::AudioAccepted));
         }
         else
         {

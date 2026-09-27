@@ -73,6 +73,7 @@ namespace rx
         std::atomic<int32_t> m_targetMs{ 60 };
         std::atomic<int32_t> m_maxMs{ 300 };
         std::atomic<int64_t> m_outputLatencyUs{ 0 };
+        std::atomic<uint32_t> m_graphRate{ 0 };
 
         mutable std::mutex m_errorLock;
         winrt::hstring m_lastError;

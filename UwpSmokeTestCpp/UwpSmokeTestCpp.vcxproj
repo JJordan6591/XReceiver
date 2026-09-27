@@ -134,6 +134,7 @@
     <ClInclude Include="H264Bitstream.h" />
     <ClInclude Include="H264Depacketizer.h" />
     <ClInclude Include="H264KeyframeGate.h" />
+    <ClInclude Include="Health.h" />
     <ClInclude Include="JitterBuffer.h" />
     <ClInclude Include="L16Convert.h" />
     <ClInclude Include="LifecycleGuard.h" />

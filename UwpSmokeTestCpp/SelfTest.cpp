@@ -26,6 +26,7 @@
 #include "VideoDeliveryCore.h"
 #include "VideoTimeline.h"
 #include "ReceiverSettings.h"
+#include "Health.h"
 
 using namespace winrt;
 using namespace winrt::Windows::Foundation;
@@ -2583,6 +2584,187 @@ namespace rx
             }
             t.Check(survived, L"hostile stress: seeded mutated buffers stay bounded");
         }
+
+        void TestHealth(TestContext& t)
+        {
+            RollingSampleWindow<4> window;
+            int64_t value = 0;
+            t.Check(!window.Percentile(50, value) && window.Count() == 0, L"health window: empty has no percentile");
+            window.Push(10);
+            t.Check(window.Percentile(50, value) && value == 10, L"health window: single sample");
+            window.Push(1);
+            window.Push(3);
+            window.Push(2);
+            t.Check(window.Count() == 4 && window.Percentile(50, value) && value == 3, L"health window: median of four");
+            int64_t p95 = 0;
+            t.Check(window.Percentile(95, p95) && p95 == 10, L"health window: p95 picks the high end");
+            window.Push(7);
+            t.Check(window.Count() == 4, L"health window: insertion evicts the oldest");
+            t.Check(window.Percentile(0, value) && value == 1, L"health window: minimum after eviction");
+
+            RollingSampleWindow<5> duplicates;
+            for (int i = 0; i < 5; ++i)
+            {
+                duplicates.Push(4);
+            }
+            duplicates.Push(100);
+            t.Check(duplicates.Percentile(50, value) && value == 4, L"health window: duplicate values stay at the median");
+            t.Check(duplicates.Percentile(100, value) && value == 100, L"health window: outlier is the maximum percentile");
+
+            double rate = 0;
+            t.Check(EventsPerSecond(100, 1000000, rate) && rate == 100.0, L"health rate: events per second");
+            t.Check(!EventsPerSecond(10, 0, rate) && !EventsPerSecond(10, -1, rate), L"health rate: zero or backward elapsed time is invalid");
+
+            auto const t0 = Clock::time_point(std::chrono::milliseconds(1000));
+            int64_t age = 0;
+            t.Check(AgeMs(false, t0, t0, age) == SampleAge::Never && age == -1, L"health age: never");
+            t.Check(AgeMs(true, t0, t0 + std::chrono::milliseconds(40), age) == SampleAge::Ok && age == 40, L"health age: elapsed");
+            t.Check(AgeMs(true, t0, t0 - std::chrono::milliseconds(1), age) == SampleAge::Invalid && age == -1, L"health age: backward clock");
+
+            HighWater water;
+            water.Observe(2);
+            water.Observe(9);
+            water.Observe(4);
+            t.Check(water.Current() == 4 && water.Peak() == 9, L"health high water: current and peak");
+            water.Observe(-1);
+            t.Check(water.Invalid() && water.Peak() == 9, L"health high water: negative sample does not lower the peak");
+            water.Reset();
+            t.Check(water.Current() == 0 && water.Peak() == 0, L"health high water: reset");
+
+            DurationWatch stall;
+            auto const s0 = Clock::time_point(std::chrono::seconds(10));
+            stall.SetActive(true, s0);
+            stall.SetActive(true, s0 + std::chrono::milliseconds(1500));
+            t.Check(stall.Active() && stall.CurrentMs() == 1500 && stall.Starts() == 1, L"health stall: continuation");
+            stall.SetActive(false, s0 + std::chrono::milliseconds(1600));
+            stall.SetActive(true, s0 + std::chrono::milliseconds(3000));
+            stall.SetActive(true, s0 + std::chrono::milliseconds(4500));
+            t.Check(stall.Starts() == 2 && stall.LongestMs() == 1500 && stall.CurrentMs() == 1500, L"health stall: longest is kept after recovery");
+            stall.Reset();
+            t.Check(!stall.Active() && stall.LongestMs() == 0 && stall.Starts() == 0, L"health stall: reset");
+
+            DurationWatch idr;
+            idr.SetActive(true, s0);
+            idr.SetActive(true, s0 + std::chrono::milliseconds(2500));
+            idr.SetActive(false, s0 + std::chrono::milliseconds(2600));
+            t.Check(!idr.Active() && idr.LongestMs() == 2500 && idr.CurrentMs() == 0, L"health idr wait: completion keeps the longest");
+
+            t.Check(ClassifyAudioBuffer(-1, 50) == AudioBufferClass::Unknown, L"health audio: unknown without a fill");
+            t.Check(ClassifyAudioBuffer(24999, 50) == AudioBufferClass::Low, L"health audio: below half the target");
+            t.Check(ClassifyAudioBuffer(25000, 50) == AudioBufferClass::InRange, L"health audio: half the target is in range");
+            t.Check(ClassifyAudioBuffer(100000, 50) == AudioBufferClass::InRange, L"health audio: twice the target is in range");
+            t.Check(ClassifyAudioBuffer(100001, 50) == AudioBufferClass::High, L"health audio: above twice the target");
+
+            auto const origin = Clock::time_point(std::chrono::seconds(0));
+            SessionHealth health;
+            health.Reset(origin);
+            HealthObservation obs;
+            obs.receiving = true;
+            obs.audioEnabled = true;
+            obs.videoEver = true;
+            obs.audioEver = true;
+            obs.videoLast = origin;
+            obs.audioLast = origin;
+            obs.submitEver = true;
+            obs.submitLast = origin;
+            obs.queueFrames = 8;
+            obs.queueFramesHigh = 8;
+            health.Update(obs, origin);
+            health.Update(obs, origin + std::chrono::milliseconds(1999));
+            t.Check((health.Flags() & HealthQueueSustained) == 0, L"health queue: just under the sustained threshold");
+            health.Update(obs, origin + std::chrono::milliseconds(2000));
+            t.Check((health.Flags() & HealthQueueSustained) != 0, L"health queue: sustained high queue");
+
+            health.Reset(origin);
+            obs.queueFrames = 1;
+            obs.queueFramesHigh = 1;
+            obs.videoLast = origin + std::chrono::milliseconds(5000);
+            obs.submitEver = true;
+            obs.submitLast = origin;
+            obs.waitingForIdr = false;
+            health.Update(obs, origin + std::chrono::milliseconds(5200));
+            t.Check((health.Flags() & HealthPacketsWithoutSubmit) != 0, L"health: packets without a submitted sample");
+
+            health.Reset(origin);
+            obs.waitingForIdr = true;
+            health.Update(obs, origin + std::chrono::milliseconds(5200));
+            t.Check((health.Flags() & HealthPacketsWithoutSubmit) == 0, L"health: keyframe wait is not a missing submit");
+
+            health.Reset(origin);
+            obs = {};
+            obs.receiving = true;
+            obs.audioEnabled = true;
+            obs.videoEver = true;
+            obs.audioEver = true;
+            obs.videoLast = origin;
+            obs.audioLast = origin;
+            health.Update(obs, origin + std::chrono::milliseconds(1000));
+            t.Check((health.Flags() & HealthStall) != 0 && health.Stall().Starts() == 1, L"health stall: both directions quiet");
+            obs.audioLast = origin + std::chrono::milliseconds(1000);
+            health.Update(obs, origin + std::chrono::milliseconds(1000));
+            t.Check((health.Flags() & HealthStall) == 0 && health.Stall().LongestMs() >= 0, L"health stall: audio clears a static-screen false stall");
+
+            health.Reset(origin);
+            obs = {};
+            obs.sourceBuilds = 1;
+            health.Update(obs, origin);
+            obs.sourceBuilds = 2;
+            health.Update(obs, origin + std::chrono::milliseconds(100));
+            obs.sourceBuilds = 3;
+            health.Update(obs, origin + std::chrono::milliseconds(200));
+            t.Check((health.Flags() & HealthRepeatedRestarts) != 0, L"health: three source builds inside the window");
+
+            health.Reset(origin);
+            obs = {};
+            obs.idrWaitMs = 2000;
+            health.Update(obs, origin);
+            t.Check((health.Flags() & HealthIdrWaitExtended) != 0, L"health: extended IDR wait");
+
+            health.Reset(origin);
+            obs = {};
+            obs.queueFramesHigh = 9;
+            health.Update(obs, origin);
+            obs.queueFramesHigh = 10;
+            health.Update(obs, origin + std::chrono::milliseconds(10));
+            t.Check((health.Flags() & HealthQueuePeakRising) != 0, L"health: queue peak still rising");
+
+            auto stats = std::make_shared<ReceiverStats>();
+            stats->Add(Stat::VideoAccepted, INT64_MAX);
+            t.Check(stats->Get(Stat::VideoAccepted) == INT64_MAX, L"health stats: accepted counter saturates");
+            stats->Raise(Stat::FrameQueueFramesHigh, 3);
+            stats->Raise(Stat::FrameQueueFramesHigh, 1);
+            t.Check(stats->Get(Stat::FrameQueueFramesHigh) == 3, L"health stats: high water does not fall");
+
+            wchar_t label[32] = {};
+            FormatHealth(HealthOk, label, 32);
+            t.Check(std::wcscmp(label, L"ok") == 0, L"health label: ok");
+            FormatHealth(HealthStall, label, 32);
+            t.Check(std::wcscmp(label, L"stall") == 0, L"health label: stall");
+
+            SessionHealth simulated;
+            auto cursor = origin;
+            simulated.Reset(cursor);
+            HealthObservation steady;
+            steady.receiving = true;
+            steady.audioEnabled = true;
+            steady.videoEver = true;
+            steady.audioEver = true;
+            steady.submitEver = true;
+            steady.audioFillUs = 50000;
+            steady.audioTargetMs = 50;
+            steady.queueFrames = 2;
+            steady.queueFramesHigh = 2;
+            for (int i = 0; i < 200000; ++i)
+            {
+                cursor += std::chrono::milliseconds(10);
+                steady.videoLast = cursor;
+                steady.audioLast = cursor;
+                steady.submitLast = cursor;
+                simulated.Update(steady, cursor);
+            }
+            t.Check(simulated.UptimeMs(cursor) == 2000000 && simulated.Flags() == HealthOk, L"health: injected long session stays healthy");
+            t.Check(sizeof(RollingSampleWindow<128>) < 4096, L"health window: fixed memory");
+        }
     }
 
     SelfTestResult RunSelfTests()
@@ -2612,6 +2794,7 @@ namespace rx
         TestLifecycle(t);
         TestReceiverSettings(t);
         TestHostileInput(t);
+        TestHealth(t);
 
         SelfTestResult result;
         result.passed = t.passed;

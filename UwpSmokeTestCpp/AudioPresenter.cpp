@@ -180,6 +180,7 @@ namespace rx
             int32_t const quantumSamples = m_graph.SamplesPerQuantum();
             m_outputLatencyUs = graphRate > 0 ? static_cast<int64_t>(latencySamples) * 1'000'000 / graphRate : 0;
             m_stats->Set(Stat::AudioOutputLatencyUs, m_outputLatencyUs.load());
+            m_graphRate = static_cast<uint32_t>(graphRate);
             m_stats->Set(Stat::AudioGraphRate, graphRate);
             m_stats->Set(Stat::AudioQuantumSamples, quantumSamples);
             m_stats->Set(Stat::AudioResamplerActive, nodeRate != m_inputRate ? 1 : 0);
@@ -290,7 +291,22 @@ namespace rx
                 check_hresult(reference.as<IMemoryBufferByteAccess>()->GetBuffer(&data, &capacity));
                 if (data != nullptr && capacity >= bytes)
                 {
+                    auto const started = Clock::now();
                     Render(reinterpret_cast<float*>(data), frames);
+                    int64_t const callbackUs = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started).count();
+                    if (callbackUs >= 0)
+                    {
+                        m_stats->Set(Stat::AudioCallbackUs, callbackUs);
+                        if (m_inputRate > 0)
+                        {
+                            // Estimate only: required frames are at the input-node rate, not HDMI latency.
+                            int64_t const budgetUs = static_cast<int64_t>(frames) * 1000000 / m_inputRate;
+                            if (callbackUs > budgetUs)
+                            {
+                                m_stats->Add(Stat::AudioCallbackOverruns);
+                            }
+                        }
+                    }
                     buffer.Length(bytes);
                     filled = true;
                 }
@@ -337,7 +353,9 @@ namespace rx
         size_t const target = static_cast<size_t>(m_targetMs.load() * framesPerMs);
         size_t const hardCap = static_cast<size_t>(std::max(m_maxMs.load(), m_targetMs.load() + 50) * framesPerMs);
 
-        m_stats->Set(Stat::AudioFillUs, static_cast<int64_t>(fill / framesPerMs * 1000.0));
+        int64_t const fillUs = static_cast<int64_t>(fill / framesPerMs * 1000.0);
+        m_stats->Set(Stat::AudioFillUs, fillUs);
+        m_stats->Raise(Stat::AudioFillHighUs, fillUs);
         m_stats->Set(Stat::AudioTargetDelayMs, m_targetMs.load());
 
         if (!m_primed)
@@ -413,6 +431,12 @@ namespace rx
         {
             std::memset(out + produced * m_channels, 0, (frames - produced) * m_channels * sizeof(float));
             m_stats->Add(Stat::AudioUnderruns);
+            uint32_t const rate = m_graphRate.load();
+            if (rate > 0)
+            {
+                int64_t const gapUs = static_cast<int64_t>(frames - produced) * 1000000 / rate;
+                m_stats->Raise(Stat::AudioUnderrunLongestUs, gapUs);
+            }
             ResetPlayout();
             return;
         }

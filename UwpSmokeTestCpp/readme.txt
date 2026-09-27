@@ -363,3 +363,138 @@ Video integrity rules (not configurable):
   an HDMI/receiver change). Stop and Start the receiver.
 - "callback err" > 0: AudioGraph rejected a frame; report it with the
   diagnostics text.
+
+
+------------------------------------------------------------------------
+11. What the diagnostics measure
+------------------------------------------------------------------------
+The overlay is a receiver-health view, not a measurement of the television
+or soundbar. "recv→submit" is the time from the first packet of an access
+unit until that access unit is handed to MediaStreamSource. It does not
+include decoder, HDMI, display or eARC delay.
+
+Clocks that may be compared:
+- Local elapsed time uses a monotonic clock (packet age, submit age,
+  stall, IDR wait, uptime, state age).
+- RTP timestamps are unwrapped per stream and are not subtracted from
+  the monotonic clock directly.
+- PTS lead compares the last submitted video PTS with the player's
+  position. It is an estimate of how far ahead the queue is, not lip-sync
+  error at the speakers.
+- Audio "buffer" is the PCM ring fill. "output" is AudioGraph's reported
+  latency. Drift ppm is the resampler correction.
+
+"accepted pkts" counts datagrams that passed admission. The Mbps figure
+is still total received video bytes, including datagrams that were later
+rejected. Memory is the UWP app-memory counter when the platform provides
+it; -1 means it was not available. Health words are diagnostics only and
+do not restart the session.
+
+Health thresholds (internal):
+- queue: frame queue at or above 8 frames for 2 s (soft depth is 2).
+- no-submit: an accepted video packet in the last 500 ms, no sample
+  submitted for 2 s, and the receiver is not waiting for a keyframe.
+- audio-low / audio-high: ring fill below half or above twice the target
+  delay for 2 s.
+- idr-wait: current keyframe wait is at least 2 s.
+- restarts: 3 or more source builds inside 10 s.
+- pts-jumps: 8 or more timestamp discontinuities since the previous
+  diagnostics tick.
+- peak-rising: the frame-queue high-water mark increases again after it
+  has already reached 8 frames.
+- stall: while Receiving, video and audio (if enabled) have both been
+  quiet for 1 s. Audio keeps a static picture from counting as a stall.
+- clock: a backward local timestamp was ignored.
+
+Per Start, counters and high-water marks reset with the session. The
+saved A/V offset is not part of these counters.
+
+
+------------------------------------------------------------------------
+12. Short Xbox validation (about 30-45 minutes)
+------------------------------------------------------------------------
+This procedure has not been run by the implementation. Fill the template
+after a real Xbox session. A 20 minute run cannot prove long-term memory
+stability.
+
+Preparation. Record the commit, Debug or Release, Xbox model, display
+resolution and refresh, UxPlay version and the exact command, the Apple
+source, which parts of the network are wired or wireless, the saved A/V
+offset, and the starting diagnostics (including memory if it is not -1).
+
+Use Release x64 for the timed sections.
+
+A. Normal mirroring, 10 minutes. Mixed motion and audio at 1080p60 when
+   the source can send it. Note start and end frame rate, bitrates,
+   jitter, queue level and peaks, stalls, decoder errors, audio buffer,
+   underruns, callback and graph errors, and memory. The saved +100 ms
+   offset must still be +100 ms.
+
+B. High motion, 5 minutes. Watch queue, drops, sample lag, PTS jumps and
+   decoder errors. Afterward the queue should fall back toward a few
+   frames.
+
+C. Static picture with audio, 5 minutes. State stays Receiving. Audio
+   stays clean. The quiet picture does not become Reconnecting.
+
+D. Recovery, about 5 minutes. Change orientation or resolution a few
+   times, restart UxPlay once, interrupt the network once, and send a
+   short bounded burst of junk UDP. The picture returns on a valid
+   keyframe. No permanent black frame, decoder loop, or stuck request.
+
+E. Lifecycle, about 5 minutes. Five Start/Stop cycles, one Stop during
+   Starting, three suspend/resume cycles. Ports bind again. The session
+   does not stay stuck.
+
+F. Optional combined stability, 20 minutes. This can replace A-C when
+   the same session includes normal, high-motion and static sections, so
+   the whole manual pass stays near 30-45 minutes. Compare start and end
+   memory, queues and error counters. There should be no continuous
+   rise, no growing A/V drift, no crash, no hang, no permanent black
+   picture, no audio loss and no restart loop.
+
+Pass when all of these hold:
+- no crash or hang
+- no permanent video or audio loss
+- no continuously growing queue
+- no unexplained sustained memory increase during this short test
+- no AudioGraph or callback errors
+- no decoder restart loop
+- no persistent queue-full condition
+- recovery succeeds after the planned disruptions
+- diagnostics stay consistent (ages are not negative except -1 for
+  "not yet", health is not stuck on clock)
+- the +100 ms offset is still saved
+- Release shows no Self-test or PoC controls
+
+Result template:
+
+  Commit:
+  Build:
+  Xbox / display:
+  UxPlay command:
+  Network:
+  A/V offset before / after:
+  A start -> end (fps, Mbps, queue, peak, stalls, underruns, memory):
+  B queue after high motion:
+  C stayed Receiving with audio:
+  D recovery:
+  E lifecycle:
+  F 20 min trend (or "replaced by A-C"):
+  Pass / fail:
+  Notes:
+
+
+------------------------------------------------------------------------
+13. Resolution boundary
+------------------------------------------------------------------------
+This receiver decodes H.264 and is aimed at up to 1080p60. A 1080p
+picture on a 4K television can be scaled by the Xbox or the display.
+That is not native 4K, and the app does not advertise a 4K mode.
+
+UxPlay's native 4K mirror on supported Apple devices is HEVC/H.265.
+Supporting that would be a later feature: HEVC RTP depacketization,
+VPS/SPS/PPS handling, HEVC keyframe and corruption recovery, Xbox HEVC
+capability detection, an HEVC MediaStreamSource, hostile-input tests,
+UxPlay rtph265pay forwarding, and a performance pass whose first target
+would be 4K30. None of that is in this build.

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "H264Depacketizer.h"
+#include "Health.h"
 #include "JitterBuffer.h"
 #include "MediaClock.h"
 #include "ReceiverSettings.h"
@@ -25,6 +26,7 @@ namespace rx
         bool everReceived = false;
         Clock::time_point lastPacket{};
         bool everSubmitted = false;
+        Clock::time_point lastSubmit{};
         bool waitingForKeyframe = true;
         bool sourceActive = false;
         bool hevcDetected = false;
@@ -98,6 +100,7 @@ namespace rx
         void RecordLatencyLocked(VideoDeliveryCore::Sample const& sample, Clock::time_point now);
         void UpdateFormatStatsLocked();
         void UpdateLatencyStatsLocked();
+        void PublishAgesLocked(Clock::time_point now);
         void PublishDepacketizerStatsLocked();
 
         // JitterBuffer::Sink
@@ -136,9 +139,10 @@ namespace rx
         bool m_hasLastIdr = false;
         Clock::time_point m_lastIdr{};
 
-        std::array<int64_t, 128> m_latencyUs{};
-        size_t m_latencyCount = 0;
-        size_t m_latencyNext = 0;
+        RollingSampleWindow<128> m_latencyUs;
+        DurationWatch m_idrWait;
+        bool m_everSubmittedSample = false;
+        Clock::time_point m_lastSubmit{};
         uint32_t m_pollCount = 0;
     };
 }

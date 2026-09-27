@@ -210,6 +210,8 @@ namespace rx
         }
 
         // Rejected datagrams must not keep the session in Receiving or reset the idle timer.
+        m_stats->Add(Stat::VideoAccepted);
+        m_stats->Add(Stat::VideoAcceptedBytes, static_cast<int64_t>(size));
         m_everReceived = true;
         m_lastPacket = now;
 
@@ -339,9 +341,12 @@ namespace rx
     void VideoReceiver::RecordLatencyLocked(VideoDeliveryCore::Sample const& sample, Clock::time_point now)
     {
         int64_t const latencyUs = std::chrono::duration_cast<std::chrono::microseconds>(now - sample.au->firstPacketTime).count();
-        m_latencyUs[m_latencyNext] = latencyUs;
-        m_latencyNext = (m_latencyNext + 1) % m_latencyUs.size();
-        m_latencyCount = std::min(m_latencyCount + 1, m_latencyUs.size());
+        if (latencyUs >= 0)
+        {
+            m_latencyUs.Push(latencyUs);
+        }
+        m_everSubmittedSample = true;
+        m_lastSubmit = now;
     }
 
     MediaStreamSample VideoReceiver::CreateSample(VideoDeliveryCore::Sample& frame)
@@ -544,7 +549,8 @@ namespace rx
         VideoActivity activity;
         activity.everReceived = m_everReceived;
         activity.lastPacket = m_lastPacket;
-        activity.everSubmitted = m_core.EverSubmitted();
+        activity.everSubmitted = m_everSubmittedSample;
+        activity.lastSubmit = m_lastSubmit;
         activity.waitingForKeyframe = m_core.Gate().IsWaiting();
         activity.sourceActive = m_core.CurrentPhase() != VideoDeliveryCore::Phase::None;
         activity.hevcDetected = m_hevcDetected;
@@ -567,6 +573,7 @@ namespace rx
                 UpdateLatencyStatsLocked();
                 m_stats->Set(Stat::VideoJitterUs, static_cast<int64_t>(m_transit.JitterMs() * 1000.0));
                 PublishDepacketizerStatsLocked();
+                PublishAgesLocked(now);
             }
             bool const requesting = m_core.HasRequest() && m_core.CurrentPhase() != VideoDeliveryCore::Phase::None;
             m_stats->Set(Stat::LastRequestAgeMs, requesting
@@ -612,23 +619,31 @@ namespace rx
         }
     }
 
+    void VideoReceiver::PublishAgesLocked(Clock::time_point now)
+    {
+        int64_t age = -1;
+        AgeMs(m_everReceived, m_lastPacket, now, age);
+        m_stats->Set(Stat::VideoPacketAgeMs, age);
+        AgeMs(m_everSubmittedSample, m_lastSubmit, now, age);
+        m_stats->Set(Stat::VideoSubmitAgeMs, age);
+
+        m_idrWait.SetActive(m_core.Gate().IsWaiting(), now);
+        m_stats->Set(Stat::IdrWaitCurrentMs, m_idrWait.CurrentMs());
+        m_stats->Set(Stat::IdrWaitLongestMs, m_idrWait.LongestMs());
+    }
+
     void VideoReceiver::UpdateLatencyStatsLocked()
     {
-        if (m_latencyCount == 0)
+        int64_t p50 = 0;
+        int64_t p95 = 0;
+        if (!m_latencyUs.Percentile(50, p50))
         {
             return;
         }
-        std::array<int64_t, 128> values{};
-        std::copy_n(m_latencyUs.begin(), m_latencyCount, values.begin());
-        auto const begin = values.begin();
-        auto const end = values.begin() + static_cast<ptrdiff_t>(m_latencyCount);
-
-        auto const p50 = begin + static_cast<ptrdiff_t>(m_latencyCount / 2);
-        std::nth_element(begin, p50, end);
-        m_stats->Set(Stat::ReceiveToSubmitP50Us, *p50);
-
-        auto const p95 = begin + static_cast<ptrdiff_t>(std::min(m_latencyCount - 1, (m_latencyCount * 95) / 100));
-        std::nth_element(begin, p95, end);
-        m_stats->Set(Stat::ReceiveToSubmitP95Us, *p95);
+        m_stats->Set(Stat::ReceiveToSubmitP50Us, p50);
+        if (m_latencyUs.Percentile(95, p95))
+        {
+            m_stats->Set(Stat::ReceiveToSubmitP95Us, p95);
+        }
     }
 }

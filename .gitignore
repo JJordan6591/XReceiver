@@ -67,3 +67,4 @@ dbg.obj
 dbg.ilk
 *.selftest.log
 rx_selftest/
+tools/selftest-out/

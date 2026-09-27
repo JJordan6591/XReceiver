@@ -72,7 +72,11 @@ namespace winrt::XReceiver::implementation
         void UpdateDisplayRequest(rx::ConnectionState state);
         void UpdateControls();
         void UpdateAutoHide(rx::ConnectionState state);
+        rx::ChromeInput ChromeInputFor(rx::ConnectionState state, bool waitingForKeyframe);
         void ApplyChrome(rx::ConnectionState state, bool waitingForKeyframe);
+        void HandleChromeAction(rx::ChromeAction action);
+        void FocusChrome();
+        void MoveFocus(rx::FocusTarget target);
         void SetOverlay(rx::PlaybackOverlay overlay);
         void ShowPanel(bool show);
         void SetDiagnosticsVisible(bool visible);

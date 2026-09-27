@@ -127,8 +127,8 @@
                     <ScrollViewer VerticalScrollBarVisibility="Auto">
                         <StackPanel>
                             <TextBlock x:Name="FirstRunTitle" Text="XReceiver" Style="{StaticResource SectionTitleText}" />
-                            <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,10"
-                                       Text="Put this Xbox and the UxPlay computer on the same local network. Video is UDP 5000. Audio is UDP 5002." />
+                            <TextBlock x:Name="FirstRunNetworkText" Style="{StaticResource HelperText}" Margin="0,0,0,10"
+                                       Text="Put this Xbox and the UxPlay computer on the same local network." />
                             <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,10"
                                        Text="On the Apple device, choose this receiver from Screen Mirroring. UxPlay is a separate project and is not included here." />
                             <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,10"

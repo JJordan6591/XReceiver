@@ -3337,9 +3337,72 @@ namespace rx
             panel.panelOpen = true;
             t.Check(FocusForChrome(panel, DecideChrome(panel), true) == FocusTarget::Stop, L"ui focus: open panel focuses Stop while receiving");
 
-            ControlAvailability controls = ControlsFor(true, false);
-            t.Check(!controls.ports && controls.stop && controls.overlay && controls.avOffset, L"ui controls: ports lock while receiving, overlay stays available");
-            t.Check(!ShowDeveloperControls(false) && ShowDeveloperControls(true), L"ui: developer controls follow the build");
+            ChromeInput diagnosticsOnly = ApplyChromeAction(ApplyChromeAction(panel, ChromeAction::View), ChromeAction::Menu);
+            ChromeVisibility const diagnosticsVisible = DecideChrome(diagnosticsOnly);
+            t.Check(diagnosticsVisible.diagnostics && !diagnosticsVisible.controls &&
+                        FocusForChrome(diagnosticsOnly, diagnosticsVisible, true) == FocusTarget::None,
+                    L"ui focus: closing the panel with diagnostics open leaves no control focused");
+            ChromeInput onboarding = healthy;
+            onboarding.firstRun = true;
+            ChromeInput stoppedPanel;
+            stoppedPanel.panelOpen = true;
+            t.Check(FocusForChrome(onboarding, DecideChrome(onboarding), true) == FocusTarget::Continue &&
+                        FocusForChrome(stoppedPanel, DecideChrome(stoppedPanel), false) == FocusTarget::Start,
+                    L"ui focus: onboarding focuses Continue and a stopped panel focuses Start");
+
+            bool actionsOnlyTouchPanels = true;
+            for (PlaybackOverlay const mode : { PlaybackOverlay::Automatic, PlaybackOverlay::AlwaysVisible, PlaybackOverlay::VideoOnly })
+            {
+                ChromeInput base = healthy;
+                base.overlay = mode;
+                ChromeInput const opened = ApplyChromeAction(ApplyChromeAction(base, ChromeAction::Menu), ChromeAction::View);
+                ChromeInput const back = ApplyChromeAction(opened, ChromeAction::Back);
+                actionsOnlyTouchPanels = actionsOnlyTouchPanels && DecideChrome(opened).controls && DecideChrome(opened).diagnostics &&
+                                         !DecideChrome(back).controls && !DecideChrome(back).diagnostics && back.overlay == mode &&
+                                         back.state == ChromeState::Receiving && back.usableVideo;
+            }
+            t.Check(actionsOnlyTouchPanels, L"ui actions: Menu, View and B open and close panels in every overlay mode");
+
+            ControlAvailability const receiving = ControlsFor(true, false);
+            ControlAvailability const idle = ControlsFor(false, false);
+            ControlAvailability const busy = ControlsFor(false, true);
+            t.Check(receiving.stop && !receiving.start && !receiving.ports && !receiving.audioToggle && idle.start && !idle.stop &&
+                        idle.ports && idle.audioToggle && !busy.start && !busy.stop && !busy.ports && !busy.audioToggle,
+                    L"ui controls: ports and audio lock while receiving or busy");
+
+            ReceiverSettings fresh = ReceiverSettings::LoadFromValues(MakeSettingsMap());
+            fresh.Sanitize();
+            wchar_t line[160] = {};
+            FormatListeningPorts(fresh.videoPort, fresh.audioPort, fresh.audioEnabled, line, 160);
+            bool const defaultStatus = std::wcscmp(line, L"Video UDP 5000, audio UDP 5002.") == 0;
+            FormatOnboardingNetwork(fresh.videoPort, fresh.audioPort, line, 160);
+            bool const defaultOnboarding = std::wcsstr(line, L"Video is UDP 5000. Audio is UDP 5002.") != nullptr;
+            t.Check(defaultStatus && defaultOnboarding, L"ui ports: a default install shows 5000 and 5002");
+
+            ReceiverSettings custom = fresh;
+            custom.videoPort = 6000;
+            custom.audioPort = 6002;
+            custom.Sanitize();
+            FormatListeningPorts(custom.videoPort, custom.audioPort, true, line, 160);
+            bool const customStatus = std::wcscmp(line, L"Video UDP 6000, audio UDP 6002.") == 0;
+            FormatListeningPorts(custom.videoPort, custom.audioPort, false, line, 160);
+            bool const videoOnlyStatus = std::wcscmp(line, L"Video UDP 6000.") == 0;
+            FormatOnboardingNetwork(custom.videoPort, custom.audioPort, line, 160);
+            bool const customOnboarding = std::wcsstr(line, L"Video is UDP 6000. Audio is UDP 6002.") != nullptr &&
+                                          std::wcsstr(line, L"5000") == nullptr;
+            t.Check(customStatus && videoOnlyStatus && customOnboarding, L"ui ports: custom ports replace the defaults in status and onboarding");
+
+            ReceiverSettings invalid = fresh;
+            invalid.videoPort = 80;
+            invalid.audioPort = 80;
+            invalid.Sanitize();
+            FormatListeningPorts(invalid.videoPort, invalid.audioPort, true, line, 160);
+            bool const sanitized = std::wcscmp(line, L"Video UDP 5000, audio UDP 5002.") == 0;
+            FormatListeningPorts(80, 70000, true, line, 160);
+            bool const refused = std::wcscmp(line, L"Video UDP —, audio UDP —.") == 0;
+            StatusCopy const ready = StatusFor(ChromeState::Waiting, false, true, false);
+            t.Check(sanitized && refused && std::wcsstr(ready.detail, L"500") == nullptr,
+                    L"ui ports: only sanitized ports are shown and the waiting copy has no fixed port");
 
             IPropertySet legacy = MakeSettingsMap();
             legacy.Insert(L"settingsVersion", box_value(2));

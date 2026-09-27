@@ -219,13 +219,9 @@ namespace winrt::XReceiver::implementation
 
     void MainPage::OnLoaded(IInspectable const&, RoutedEventArgs const&)
     {
-        if (FirstRunVisible())
+        if (FirstRunVisible() || PanelVisible())
         {
-            FirstRunContinueButton().Focus(FocusState::Programmatic);
-        }
-        else if (PanelVisible())
-        {
-            StartButton().Focus(FocusState::Programmatic);
+            FocusChrome();
         }
     }
 
@@ -287,9 +283,9 @@ namespace winrt::XReceiver::implementation
         }
         m_busy = false;
         UpdateControls();
-        if (PanelVisible() && m_session && m_session->IsActive())
+        if (PanelVisible())
         {
-            StopButton().Focus(FocusState::Programmatic);
+            FocusChrome();
         }
     }
 
@@ -315,7 +311,7 @@ namespace winrt::XReceiver::implementation
         UpdateControls();
         if (PanelVisible())
         {
-            StartButton().Focus(FocusState::Programmatic);
+            FocusChrome();
         }
     }
 
@@ -331,7 +327,7 @@ namespace winrt::XReceiver::implementation
 
     void MainPage::OnDiagnosticsClick(IInspectable const&, RoutedEventArgs const&)
     {
-        SetDiagnosticsVisible(DiagnosticsPanel().Visibility() != Visibility::Visible);
+        HandleChromeAction(rx::ChromeAction::View);
     }
 
     void MainPage::OnHelpClick(IInspectable const&, RoutedEventArgs const&)
@@ -346,7 +342,6 @@ namespace winrt::XReceiver::implementation
         m_settings.Save();
         ShowFirstRun(false);
         ShowPanel(true);
-        StartButton().Focus(FocusState::Programmatic);
     }
 
     void MainPage::OnPortLostFocus(IInspectable const&, RoutedEventArgs const&)
@@ -601,12 +596,12 @@ namespace winrt::XReceiver::implementation
         }
         if (key == VirtualKey::GamepadMenu)
         {
-            ShowPanel(!PanelVisible());
+            HandleChromeAction(rx::ChromeAction::Menu);
             args.Handled(true);
         }
         else if (key == VirtualKey::GamepadView)
         {
-            SetDiagnosticsVisible(DiagnosticsPanel().Visibility() != Visibility::Visible);
+            HandleChromeAction(rx::ChromeAction::View);
             args.Handled(true);
         }
         else if (!PanelVisible() && IsGamepadActivationKey(key))
@@ -620,8 +615,7 @@ namespace winrt::XReceiver::implementation
     {
         // Single-page app: B only hides the panel and must never navigate or exit.
         m_lastInput = rx::Clock::now();
-        ShowPanel(false);
-        SetDiagnosticsVisible(false);
+        HandleChromeAction(rx::ChromeAction::Back);
         args.Handled(true);
     }
 
@@ -642,7 +636,11 @@ namespace winrt::XReceiver::implementation
         DiagnosticsPanel().IsHitTestVisible(false);
         if (show)
         {
-            FirstRunContinueButton().Focus(FocusState::Programmatic);
+            // Ports can change only while onboarding is closed, so refreshing on open is enough.
+            wchar_t network[160] = {};
+            rx::FormatOnboardingNetwork(m_settings.videoPort, m_settings.audioPort, network, 160);
+            FirstRunNetworkText().Text(network);
+            FocusChrome();
         }
     }
 
@@ -655,15 +653,7 @@ namespace winrt::XReceiver::implementation
         ControlPanel().Visibility(show ? Visibility::Visible : Visibility::Collapsed);
         if (show)
         {
-            bool const active = m_session && m_session->IsActive();
-            if (active)
-            {
-                StopButton().Focus(FocusState::Programmatic);
-            }
-            else
-            {
-                StartButton().Focus(FocusState::Programmatic);
-            }
+            FocusChrome();
         }
         ApplyChrome(m_lastState, false);
     }
@@ -681,12 +671,12 @@ namespace winrt::XReceiver::implementation
 
     void MainPage::UpdateControls()
     {
-        bool const active = m_session && m_session->IsActive();
-        StartButton().IsEnabled(!active && !m_busy);
-        StopButton().IsEnabled(active && !m_busy);
-        VideoPortBox().IsEnabled(!active && !m_busy);
-        AudioPortBox().IsEnabled(!active && !m_busy);
-        AudioToggle().IsEnabled(!active && !m_busy);
+        rx::ControlAvailability const controls = rx::ControlsFor(m_session && m_session->IsActive(), m_busy);
+        StartButton().IsEnabled(controls.start);
+        StopButton().IsEnabled(controls.stop);
+        VideoPortBox().IsEnabled(controls.ports);
+        AudioPortBox().IsEnabled(controls.ports);
+        AudioToggle().IsEnabled(controls.audioToggle);
     }
 
     void MainPage::OnUiTick()
@@ -742,12 +732,11 @@ namespace winrt::XReceiver::implementation
         std::wstring detail = copy.detail;
         if (state == ConnectionState::Waiting)
         {
-            Append(detail, L" Listening on UDP %d", m_settings.videoPort);
-            if (m_settings.audioEnabled)
-            {
-                Append(detail, L" and %d", m_settings.audioPort);
-            }
-            detail += L".";
+            // Ports are locked while the receiver runs, so the saved values are the listeners.
+            wchar_t ports[64] = {};
+            rx::FormatListeningPorts(m_settings.videoPort, m_settings.audioPort, m_settings.audioEnabled, ports, 64);
+            detail += L" ";
+            detail += ports;
         }
         else if (state == ConnectionState::Receiving && !waitingKeyframe)
         {
@@ -833,13 +822,8 @@ namespace winrt::XReceiver::implementation
         SetOverlay(rx::PlaybackOverlay::VideoOnly);
     }
 
-    void MainPage::ApplyChrome(ConnectionState state, bool waitingForKeyframe)
+    rx::ChromeInput MainPage::ChromeInputFor(ConnectionState state, bool waitingForKeyframe)
     {
-        if (state != m_chromeState)
-        {
-            m_chromeState = state;
-            m_statusHoldUntil = rx::Clock::now() + std::chrono::seconds(5);
-        }
         rx::ChromeInput input;
         input.overlay = m_settings.playbackOverlay;
         input.state = ToChromeState(state);
@@ -849,16 +833,68 @@ namespace winrt::XReceiver::implementation
         input.diagnosticsOpen = m_liveDiagnostics;
         input.statusHold = rx::Clock::now() < m_statusHoldUntil;
         input.firstRun = FirstRunVisible();
+        return input;
+    }
+
+    void MainPage::ApplyChrome(ConnectionState state, bool waitingForKeyframe)
+    {
+        if (state != m_chromeState)
+        {
+            m_chromeState = state;
+            m_statusHoldUntil = rx::Clock::now() + std::chrono::seconds(5);
+        }
+        rx::ChromeInput const input = ChromeInputFor(state, waitingForKeyframe);
         rx::ChromeVisibility const visible = rx::DecideChrome(input);
         StatusPill().Visibility(visible.status ? Visibility::Visible : Visibility::Collapsed);
         WaitingGuide().Visibility(visible.waitingGuide ? Visibility::Visible : Visibility::Collapsed);
         ControlPanel().Visibility(visible.controls ? Visibility::Visible : Visibility::Collapsed);
         DiagnosticsPanel().Visibility(visible.diagnostics ? Visibility::Visible : Visibility::Collapsed);
-        if (m_controlsWereVisible && !visible.controls && !visible.diagnostics && !input.firstRun)
+        if (m_controlsWereVisible && !visible.controls && !input.firstRun)
         {
-            this->Focus(FocusState::Programmatic);
+            // Hidden controls must not keep focus, also when diagnostics stay open.
+            MoveFocus(rx::FocusForChrome(input, visible, m_session && m_session->IsActive()));
         }
         m_controlsWereVisible = visible.controls;
+    }
+
+    // Menu, View and B change panels only; playback is untouched.
+    void MainPage::HandleChromeAction(rx::ChromeAction action)
+    {
+        rx::ChromeInput const before = ChromeInputFor(m_lastState, false);
+        rx::ChromeInput const after = rx::ApplyChromeAction(before, action);
+        if (after.panelOpen != before.panelOpen)
+        {
+            ShowPanel(after.panelOpen);
+        }
+        if (after.diagnosticsOpen != before.diagnosticsOpen)
+        {
+            SetDiagnosticsVisible(after.diagnosticsOpen);
+        }
+    }
+
+    void MainPage::FocusChrome()
+    {
+        rx::ChromeInput const input = ChromeInputFor(m_lastState, false);
+        MoveFocus(rx::FocusForChrome(input, rx::DecideChrome(input), m_session && m_session->IsActive()));
+    }
+
+    void MainPage::MoveFocus(rx::FocusTarget target)
+    {
+        switch (target)
+        {
+        case rx::FocusTarget::Continue:
+            FirstRunContinueButton().Focus(FocusState::Programmatic);
+            break;
+        case rx::FocusTarget::Start:
+            StartButton().Focus(FocusState::Programmatic);
+            break;
+        case rx::FocusTarget::Stop:
+            StopButton().Focus(FocusState::Programmatic);
+            break;
+        case rx::FocusTarget::None:
+            this->Focus(FocusState::Programmatic);
+            break;
+        }
     }
 
     void MainPage::UpdateDiagnostics(rx::ReceiverStats::Snapshot const& s)
@@ -868,14 +904,22 @@ namespace winrt::XReceiver::implementation
         static wchar_t const* const kPhases[] = { L"none", L"opening", L"starting", L"playing" };
         int64_t const phase = at(Stat::DeliveryPhase);
 
+        // Sources publish -1 for a value that is not available yet; show it as an em dash.
+        auto optional = [&](Stat stat, int64_t divisor, wchar_t const* suffix, wchar_t* out, size_t outChars)
+        {
+            int64_t const value = at(stat);
+            rx::FormatUnavailable(value >= 0, value / divisor, suffix, out, outChars);
+        };
+
         wchar_t health[96] = {};
         rx::FormatHealth(static_cast<uint32_t>(at(Stat::HealthFlags)), health, 96);
         text += L"— Session —\n";
         Append(text, L"health %s  uptime %lld s  this state %lld s\n",
             health, at(Stat::SessionUptimeMs) / 1000, at(Stat::StateAgeMs) / 1000);
-        Append(text, L"memory %lld KB  peak %lld KB  stalls %lld  now %lld ms  longest %lld ms\n",
-            at(Stat::AppMemoryBytes) < 0 ? int64_t{ -1 } : at(Stat::AppMemoryBytes) / 1024,
-            at(Stat::AppMemoryHighBytes) / 1024, at(Stat::StallCount), at(Stat::StallCurrentMs), at(Stat::StallLongestMs));
+        wchar_t memory[32] = {};
+        optional(Stat::AppMemoryBytes, 1024, L" KB", memory, 32);
+        Append(text, L"memory %s  peak %lld KB  stalls %lld  now %lld ms  longest %lld ms\n",
+            memory, at(Stat::AppMemoryHighBytes) / 1024, at(Stat::StallCount), at(Stat::StallCurrentMs), at(Stat::StallLongestMs));
 
         text += L"\n— Stream / source —\n";
         Append(text, L"%lld×%lld  profile %lld  level %.1f  %.1f fps  %.2f Mbps\n",
@@ -891,9 +935,13 @@ namespace winrt::XReceiver::implementation
         Append(text, L"invalid %lld  wrong PT %lld  foreign SSRC %lld  out-of-window %lld  oversize %lld  socket err %lld\n",
             at(Stat::VideoInvalid), at(Stat::VideoWrongPayloadType), at(Stat::VideoForeignSsrc), at(Stat::VideoOutOfWindow),
             at(Stat::VideoTooLarge), at(Stat::VideoSocketErrors));
-        Append(text, L"seq %lld  ts %lld  jitter %.2f ms  last packet %lld ms  last submit %lld ms\n",
+        wchar_t packetAge[32] = {};
+        wchar_t submitAge[32] = {};
+        optional(Stat::VideoPacketAgeMs, 1, L" ms", packetAge, 32);
+        optional(Stat::VideoSubmitAgeMs, 1, L" ms", submitAge, 32);
+        Append(text, L"seq %lld  ts %lld  jitter %.2f ms  last packet %s  last submit %s\n",
             at(Stat::VideoLastSequence), at(Stat::VideoLastTimestamp), at(Stat::VideoJitterUs) / 1000.0,
-            at(Stat::VideoPacketAgeMs), at(Stat::VideoSubmitAgeMs));
+            packetAge, submitAge);
 
         text += L"\n— H.264 parser & recovery —\n";
         Append(text, L"AU complete %lld  incomplete %lld (no marker %lld)  discarded %lld  IDR %lld (interval %lld ms)\n",
@@ -915,9 +963,11 @@ namespace winrt::XReceiver::implementation
             at(Stat::FrameQueueFramesHigh), at(Stat::FrameQueueBytesHigh) / 1024);
         Append(text, L"pts jumps %lld  sample errors %lld  recv→submit is not display latency\n",
             at(Stat::PtsDiscontinuities), at(Stat::SampleErrors));
-        Append(text, L"requests %lld  deferred %lld  pending %lld  overlapping %lld  last request %lld ms ago\n",
+        wchar_t requestAge[32] = {};
+        optional(Stat::LastRequestAgeMs, 1, L" ms ago", requestAge, 32);
+        Append(text, L"requests %lld  deferred %lld  pending %lld  overlapping %lld  last request %s\n",
             at(Stat::SampleRequests), at(Stat::SampleDeferrals), at(Stat::PendingRequests), at(Stat::OverlappingRequests),
-            at(Stat::LastRequestAgeMs));
+            requestAge);
         Append(text, L"processed %lld  in flight %lld  rendered %lld  decoder failures %lld\n",
             at(Stat::SamplesProcessed), at(Stat::SamplesInFlight), at(Stat::SamplesRendered), at(Stat::MediaFailures));
         Append(text, L"recv→submit p50 %.1f / p95 %.1f ms  sample lag %.1f ms  pts lead %.1f ms\n",

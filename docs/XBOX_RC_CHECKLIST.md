@@ -24,6 +24,8 @@ Install over the previous package. Do not clear app data.
 - [ ] Video only shows no chrome during healthy playback
 - [ ] Menu and View open temporary UI in Video only
 - [ ] B returns to an unobstructed picture and does not stop playback
+- [ ] With diagnostics open, Menu closes the panel and no hidden control keeps the focus ring
+- [ ] After changing the ports, Ready to connect and Setup help show the new ports; defaults show 5000 and 5002
 - [ ] Release has no Self-test or PoC controls
 
 ## Playback (10–15 minutes, one session)

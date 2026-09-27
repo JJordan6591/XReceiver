@@ -39,3 +39,5 @@ XReceiver is an Xbox Developer Mode app. It receives H.264 video (UDP 5000) and 
 - An audio packet that is not a whole number of L16 stereo frames is rejected before it can lock, take over or refresh the audio stream
 - Fragmented (FU-A) H.264 NALs now count toward the existing per-access-unit NAL cap, once per NAL
 - Audio recovers at once when the sender restarts its RTP audio timestamps by more than 200 ms without changing SSRC
+- Waiting status and onboarding show the configured video and audio ports instead of a fixed 5000 and 5002
+- Menu, View, B, controller focus and control enablement use the UI helpers the host tests cover. Closing the panel while diagnostics stay open no longer leaves focus on a hidden control. Diagnostics show an em dash for values that are not available yet

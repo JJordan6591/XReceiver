@@ -172,7 +172,7 @@ namespace rx
         switch (state)
         {
         case ChromeState::Waiting:
-            return { L"Ready to connect", L"Use the same local network as this Xbox. Video UDP 5000, audio UDP 5002." };
+            return { L"Ready to connect", L"Use the same local network as this Xbox." };
         case ChromeState::Starting:
             return { L"Starting receiver", L"Opening listeners." };
         case ChromeState::Receiving:
@@ -211,6 +211,58 @@ namespace rx
         }
     }
 
+    // A saved port is always in range; anything else is shown as unavailable rather than as the
+    // active configuration.
+    inline bool IsDisplayablePort(int32_t port) { return port >= 1024 && port <= 65535; }
+
+    inline void FormatPort(int32_t port, wchar_t* out, size_t outChars)
+    {
+        if (IsDisplayablePort(port))
+        {
+            swprintf_s(out, outChars, L"%d", port);
+        }
+        else
+        {
+            wcscpy_s(out, outChars, L"—");
+        }
+    }
+
+    // Waiting status line for the configured listeners, e.g. "Video UDP 5000, audio UDP 5002."
+    inline void FormatListeningPorts(int32_t videoPort, int32_t audioPort, bool audioEnabled, wchar_t* out, size_t outChars)
+    {
+        if (out == nullptr || outChars == 0)
+        {
+            return;
+        }
+        wchar_t video[8] = {};
+        wchar_t audio[8] = {};
+        FormatPort(videoPort, video, 8);
+        FormatPort(audioPort, audio, 8);
+        if (audioEnabled)
+        {
+            swprintf_s(out, outChars, L"Video UDP %s, audio UDP %s.", video, audio);
+        }
+        else
+        {
+            swprintf_s(out, outChars, L"Video UDP %s.", video);
+        }
+    }
+
+    // Onboarding network line with the configured ports.
+    inline void FormatOnboardingNetwork(int32_t videoPort, int32_t audioPort, wchar_t* out, size_t outChars)
+    {
+        if (out == nullptr || outChars == 0)
+        {
+            return;
+        }
+        wchar_t video[8] = {};
+        wchar_t audio[8] = {};
+        FormatPort(videoPort, video, 8);
+        FormatPort(audioPort, audio, 8);
+        swprintf_s(out, outChars, L"Put this Xbox and the UxPlay computer on the same local network. Video is UDP %s. Audio is UDP %s.",
+                   video, audio);
+    }
+
     inline void FormatUnavailable(bool available, int64_t value, wchar_t const* suffix, wchar_t* out, size_t outChars)
     {
         if (out == nullptr || outChars == 0)
@@ -225,18 +277,15 @@ namespace rx
         swprintf_s(out, outChars, L"%lld%s", static_cast<long long>(value), suffix == nullptr ? L"" : suffix);
     }
 
-    inline bool ShowDeveloperControls(bool debugBuild) { return debugBuild; }
-
     struct ControlAvailability
     {
         bool start = false;
         bool stop = false;
         bool ports = false;
         bool audioToggle = false;
-        bool overlay = true;
-        bool avOffset = true;
     };
 
+    // Ports and audio change only while stopped. Overlay and A/V offset are never disabled; they apply at once.
     inline ControlAvailability ControlsFor(bool receiverActive, bool busy)
     {
         ControlAvailability out;
@@ -244,8 +293,6 @@ namespace rx
         out.stop = receiverActive && !busy;
         out.ports = !receiverActive && !busy;
         out.audioToggle = !receiverActive && !busy;
-        out.overlay = !busy;
-        out.avOffset = !busy;
         return out;
     }
 }

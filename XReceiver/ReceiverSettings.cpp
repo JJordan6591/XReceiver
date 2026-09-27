@@ -240,7 +240,7 @@ namespace rx
         audioMinDelayMs = std::clamp(audioMinDelayMs, 5, 500);
         audioMaxDelayMs = std::clamp(audioMaxDelayMs, audioMinDelayMs, 1000);
         videoPipelineLatencyMs = std::clamp(videoPipelineLatencyMs, 0, 1000);
-        avOffsetMs = std::clamp(avOffsetMs, -500, 500);
+        avOffsetMs = std::clamp(avOffsetMs, -kMaxAvOffsetMs, kMaxAvOffsetMs);
         playbackOverlay = SanitizeOverlay(static_cast<int32_t>(playbackOverlay));
         idleTimeoutMs = std::clamp(idleTimeoutMs, kMinIdleTimeoutMs, 60000);
         ssrcTakeoverMs = std::clamp(ssrcTakeoverMs, 100, 60000);

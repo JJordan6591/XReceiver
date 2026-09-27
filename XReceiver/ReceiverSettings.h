@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 
+#include "MediaClock.h"
 #include "UiChrome.h"
 
 namespace winrt::Windows::Foundation::Collections
@@ -64,6 +66,7 @@ namespace rx
         static constexpr int32_t kMaxFrameQueueBytes = 256 * 1024 * 1024;
 
         static constexpr int32_t kCurrentSettingsVersion = 3;
+        static constexpr int32_t kMaxAvOffsetMs = 500;
 
         static ReceiverSettings Load();
         static ReceiverSettings LoadFromValues(winrt::Windows::Foundation::Collections::IPropertySet const& values);
@@ -75,4 +78,17 @@ namespace rx
 
         static bool IsValidPort(int32_t port) { return port >= 1024 && port <= 65535; }
     };
+
+    // Settings part of the A/V sync inputs, with the offset clamped as Sanitize() clamps it.
+    // Startup and live offset changes both use it, so the first audio target already carries
+    // the saved offset. The caller adds live measurements.
+    inline AvSyncInputs AvSyncInputsFor(ReceiverSettings const& settings, int32_t avOffsetMs)
+    {
+        AvSyncInputs inputs;
+        inputs.videoPipelineLatencyMs = settings.videoPipelineLatencyMs;
+        inputs.userOffsetMs = std::clamp(avOffsetMs, -ReceiverSettings::kMaxAvOffsetMs, ReceiverSettings::kMaxAvOffsetMs);
+        inputs.minDelayMs = settings.audioMinDelayMs;
+        inputs.maxDelayMs = settings.audioMaxDelayMs;
+        return inputs;
+    }
 }

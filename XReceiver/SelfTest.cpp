@@ -2526,8 +2526,16 @@ namespace rx
             static constexpr double kOutPerMs = 48.0;
             static constexpr size_t kQuantum = 480;
 
-            // Starts in steady playout: one quantum has already rendered against the target.
-            explicit PlayoutModel(int32_t targetMs = 60) : target(targetMs), fillMs(targetMs) { Quantum(); }
+            // Steady: one quantum has already rendered against the target. Otherwise playout starts
+            // empty and primes, as after Start.
+            explicit PlayoutModel(int32_t targetMs = 60, bool steady = true) : target(targetMs), fillMs(steady ? targetMs : 0.0)
+            {
+                primed = steady;
+                if (steady)
+                {
+                    Quantum();
+                }
+            }
 
             // Returns output frames of silence inserted by a manual step in this quantum.
             size_t Quantum()
@@ -2536,6 +2544,18 @@ namespace rx
                 size_t const discard = step.Update(s, primed, kInPerMs);
                 discarded += discard;
                 fillMs = std::max(0.0, fillMs - discard / kInPerMs);
+                if (!primed)
+                {
+                    // Render plays silence until the fill first reaches the target.
+                    if (fillMs < s.targetMs)
+                    {
+                        fillMs += 10.0 + senderExcessMs;
+                        now += std::chrono::milliseconds(10);
+                        ++primingQuanta;
+                        return 0;
+                    }
+                    primed = true;
+                }
                 errorMs = fillMs - s.targetMs + step.PendingHoldMs();
                 correction = drift.Update(errorMs, now);
                 maxAbsCorrection = std::max(maxAbsCorrection, std::fabs(correction));
@@ -2566,6 +2586,7 @@ namespace rx
             Clock::time_point now = Clock::time_point{} + std::chrono::hours(1);
             size_t held = 0;
             size_t discarded = 0;
+            int primingQuanta = 0;
             double errorMs = 0.0;
             double correction = 0.0;
             double maxAbsCorrection = 0.0;
@@ -2704,6 +2725,62 @@ namespace rx
                 t.Check(negative && loaded.avOffsetMs == 10 && ReceiverSettings::kCurrentSettingsVersion == 3 &&
                             unbox_value_or<int32_t>(values.TryLookup(L"settingsVersion"), 0) == 3,
                         L"av offset step: saved offset key, sign and schema version are unchanged");
+            }
+        }
+
+        // The target ReceiverSession sets before the audio graph starts: stats were just reset and
+        // the output latency is not known yet.
+        int32_t StartupAudioTargetMs(ReceiverSettings const& settings, int32_t savedOffsetMs)
+        {
+            return ComputeAudioTargetDelayMs(AvSyncInputsFor(settings, savedOffsetMs));
+        }
+
+        void TestStartupAvOffset(TestContext& t)
+        {
+            ReceiverSettings settings;
+            settings.Sanitize();
+
+            // Playout primes to the startup target, then the first UI update repeats the same value.
+            auto startsClean = [&](int32_t offsetMs, int32_t expectedMs)
+            {
+                int32_t const target = StartupAudioTargetMs(settings, offsetMs);
+                PlayoutModel m(target, false);
+                m.Run(40);
+                bool const primedAtTarget = m.primed && m.primingQuanta == (expectedMs + 9) / 10 && m.Near(expectedMs);
+                m.target.Set(StartupAudioTargetMs(settings, offsetMs));
+                m.Run(50);
+                return target == expectedMs && primedAtTarget && m.held == 0 && m.discarded == 0 && m.Near(expectedMs);
+            };
+            t.Check(startsClean(0, 60), L"av offset startup: zero offset primes to the 60 ms default with no step");
+            t.Check(startsClean(100, 160), L"av offset startup: a saved +100 ms primes to 160 ms with no later silence step");
+            t.Check(startsClean(-100, 20), L"av offset startup: a saved -100 ms primes to the 20 ms floor with no later skip");
+
+            t.Check(AvSyncInputsFor(settings, 501).userOffsetMs == 500 && AvSyncInputsFor(settings, -9000).userOffsetMs == -500 &&
+                        StartupAudioTargetMs(settings, 240) == 300 && StartupAudioTargetMs(settings, 241) == 300 &&
+                        StartupAudioTargetMs(settings, 500) == 300 && StartupAudioTargetMs(settings, -39) == 21 &&
+                        StartupAudioTargetMs(settings, -40) == 20 && StartupAudioTargetMs(settings, -500) == 20,
+                    L"av offset startup: offset and target clamps match the live path at both ends");
+
+            {
+                // After a clean +100 ms start, one live press is one prompt step, and drift still works.
+                PlayoutModel m(StartupAudioTargetMs(settings, 100), false);
+                m.Run(40);
+                m.target.Set(StartupAudioTargetMs(settings, 100));
+                m.Run(10);
+                bool const quietStart = m.held == 0 && m.discarded == 0;
+                m.target.Step(StartupAudioTargetMs(settings, 110));
+                size_t const first = m.Quantum();
+                m.Run(20);
+                t.Check(quietStart && first == 480 && m.held == 480 && m.discarded == 0 && m.Near(170.0),
+                        L"av offset startup: a later live change is exactly one prompt 10 ms step");
+
+                m.senderExcessMs = 0.02;
+                m.Run(1500);
+                bool const trimming = m.correction > 0.0 && m.errorMs < 25.0;
+                m.senderExcessMs = 0.0;
+                m.Run(1500);
+                t.Check(trimming && m.correction == 0.0 && std::fabs(m.errorMs) < DriftTrim::kDeadbandMs && m.held == 480,
+                        L"av offset startup: drift correction continues after startup and a live change");
             }
         }
 
@@ -3451,6 +3528,7 @@ namespace rx
         TestResampler(t);
         TestAudioStage(t);
         TestManualAvOffset(t);
+        TestStartupAvOffset(t);
         TestLifecycle(t);
         TestReceiverSettings(t);
         TestHostileInput(t);

@@ -388,7 +388,7 @@ namespace winrt::XReceiver::implementation
 
     void MainPage::OnAvMinusClick(IInspectable const&, RoutedEventArgs const&)
     {
-        m_settings.avOffsetMs = std::max(-500, m_settings.avOffsetMs - 10);
+        m_settings.avOffsetMs = std::max(-rx::ReceiverSettings::kMaxAvOffsetMs, m_settings.avOffsetMs - 10);
         wchar_t offset[64] = {};
         rx::FormatAvOffset(m_settings.avOffsetMs, offset, 64);
         AvOffsetText().Text(offset);
@@ -401,7 +401,7 @@ namespace winrt::XReceiver::implementation
 
     void MainPage::OnAvPlusClick(IInspectable const&, RoutedEventArgs const&)
     {
-        m_settings.avOffsetMs = std::min(500, m_settings.avOffsetMs + 10);
+        m_settings.avOffsetMs = std::min(rx::ReceiverSettings::kMaxAvOffsetMs, m_settings.avOffsetMs + 10);
         wchar_t offset[64] = {};
         rx::FormatAvOffset(m_settings.avOffsetMs, offset, 64);
         AvOffsetText().Text(offset);

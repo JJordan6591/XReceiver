@@ -45,6 +45,7 @@ Pass only if all of these hold:
 - [ ] Audio stays clean
 - [ ] A/V offset still feels acceptable
 - [ ] During playback, +10 ms and -10 ms are heard at once as a brief gap or skip, and several fast presses land on the shown value
+- [ ] With a saved +100 ms, press Start while mirroring is already running: audio starts at the offset with no second gap a moment later
 - [ ] Video only stays clear during healthy playback
 
 ## Result

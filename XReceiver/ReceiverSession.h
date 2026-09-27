@@ -70,6 +70,7 @@ namespace rx
         void PostAudioFailed(std::weak_ptr<AudioPresenter> presenter, uint64_t generation);
         void HandleAudioFailed(std::shared_ptr<AudioPresenter> const& presenter);
         void UpdateAudioTarget(bool manualStep);
+        int32_t AudioTargetMs(double outputLatencyMs) const;
         void UpdateSessionHealth(Clock::time_point now, VideoReceiver* video, AudioReceiver* audio);
         void SetError(winrt::hstring const& message);
         void SetAudioStatus(winrt::hstring const& message);

@@ -100,7 +100,7 @@ The panel hides after a few seconds of playback if the controller is idle. Ports
 
 The offset is milliseconds. Positive means audio is delayed further (audio later). Negative means audio earlier. The control steps by 10 ms and the value is saved.
 
-A change during playback takes effect on the next audio quantum, about 10 ms. Raising the offset plays that much silence once. Lowering it skips that much buffered audio once. Presses that arrive together are combined into one move to the latest value. Slow clock-drift correction then carries on as before. The audio buffer stays between 20 and 300 ms by default, more on a jittery network, so an offset that would go past either end has no further effect. A saved `+100 ms` stays `+100 ms` across launches and across the XReceiver rename, because the package identity did not change.
+A change during playback takes effect on the next audio quantum, about 10 ms. Raising the offset plays that much silence once. Lowering it skips that much buffered audio once. Presses that arrive together are combined into one move to the latest value. Slow clock-drift correction then carries on as before. A saved offset is part of the audio target before playback starts, so audio begins at that offset even when media is already arriving at Start. The audio buffer stays between 20 and 300 ms by default, more on a jittery network, so an offset that would go past either end has no further effect. A saved `+100 ms` stays `+100 ms` across launches and across the XReceiver rename, because the package identity did not change.
 
 ## Diagnostics
 

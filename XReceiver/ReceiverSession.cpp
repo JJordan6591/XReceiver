@@ -158,7 +158,9 @@ namespace rx
             auto audio = std::make_shared<AudioReceiver>(m_settings, m_stats, ring);
             auto audioPresenter = std::make_shared<AudioPresenter>(ring, m_stats, kL16SampleRate);
             audioPresenter->SetMaxDelayMs(std::min(m_settings.audioMaxDelayMs + 200, 500));
-            audioPresenter->SetTargetDelayMs(m_settings.audioMinDelayMs + 40);
+            // The saved offset is part of the target before the graph starts, so the first priming
+            // already waits for it. Output latency is not known yet; the UI tick adds it.
+            audioPresenter->SetTargetDelayMs(AudioTargetMs(0.0));
             std::weak_ptr<AudioPresenter> weakPresenter = audioPresenter;
             audioPresenter->SetFailureHandler([weak, weakPresenter, generation]()
                 {
@@ -522,15 +524,7 @@ namespace rx
             return;
         }
 
-        AvSyncInputs inputs;
-        inputs.videoPipelineLatencyMs = m_settings.videoPipelineLatencyMs;
-        inputs.videoReceiveToSubmitMs = m_stats->Get(Stat::ReceiveToSubmitP50Us) / 1000.0;
-        inputs.audioOutputLatencyMs = audioPresenter->OutputLatencyMs();
-        inputs.audioJitterMs = m_stats->Get(Stat::AudioJitterUs) / 1000.0;
-        inputs.userOffsetMs = m_avOffsetMs.load();
-        inputs.minDelayMs = m_settings.audioMinDelayMs;
-        inputs.maxDelayMs = m_settings.audioMaxDelayMs;
-        int32_t const target = ComputeAudioTargetDelayMs(inputs);
+        int32_t const target = AudioTargetMs(audioPresenter->OutputLatencyMs());
         if (manualStep)
         {
             audioPresenter->StepTargetDelayMs(target);
@@ -539,6 +533,15 @@ namespace rx
         {
             audioPresenter->SetTargetDelayMs(target);
         }
+    }
+
+    int32_t ReceiverSession::AudioTargetMs(double outputLatencyMs) const
+    {
+        AvSyncInputs inputs = AvSyncInputsFor(m_settings, m_avOffsetMs.load());
+        inputs.videoReceiveToSubmitMs = m_stats->Get(Stat::ReceiveToSubmitP50Us) / 1000.0;
+        inputs.audioOutputLatencyMs = outputLatencyMs;
+        inputs.audioJitterMs = m_stats->Get(Stat::AudioJitterUs) / 1000.0;
+        return ComputeAudioTargetDelayMs(inputs);
     }
 
     void ReceiverSession::UpdateSessionHealth(Clock::time_point now, VideoReceiver* video, AudioReceiver* audio)

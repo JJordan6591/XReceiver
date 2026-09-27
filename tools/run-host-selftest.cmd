@@ -28,10 +28,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-set "SRC=%CD%\UwpSmokeTestCpp"
+set "SRC=%CD%\XReceiver"
 set "GEN=%SRC%\Generated Files"
 set "OUT=%CD%\tools\selftest-out"
-if not exist "%OUT%" mkdir "%OUT%"
+if exist "%OUT%" rmdir /s /q "%OUT%"
+mkdir "%OUT%"
 pushd "%OUT%"
 if errorlevel 1 exit /b 1
 

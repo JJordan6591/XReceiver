@@ -7,7 +7,7 @@
   <mp:PhoneIdentity PhoneProductId="2d6afc56-ebaa-4e72-95e0-1d9719d07191" PhonePublisherId="00000000-0000-0000-0000-000000000000"/>
   <Properties>
     <DisplayName>XReceiver</DisplayName>
-    <PublisherDisplayName>jack</PublisherDisplayName>
+    <PublisherDisplayName>XReceiver contributors</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
   <Dependencies>

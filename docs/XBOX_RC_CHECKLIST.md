@@ -42,6 +42,7 @@ Pass only if all of these hold:
 - [ ] Picture returns on a valid keyframe
 - [ ] Audio stays clean
 - [ ] A/V offset still feels acceptable
+- [ ] During playback, +10 ms and -10 ms are heard at once as a brief gap or skip, and several fast presses land on the shown value
 - [ ] Video only stays clear during healthy playback
 
 ## Result

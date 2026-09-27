@@ -126,6 +126,7 @@
     <ClInclude Include="MainPage.h">
       <DependentUpon>MainPage.xaml</DependentUpon>
     </ClInclude>
+    <ClInclude Include="AudioPlayout.h" />
     <ClInclude Include="AudioPresenter.h" />
     <ClInclude Include="AudioReceiver.h" />
     <ClInclude Include="BoundedQueue.h" />

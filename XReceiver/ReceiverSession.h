@@ -57,7 +57,8 @@ namespace rx
 
         std::shared_ptr<ReceiverStats> Stats() const { return m_stats; }
 
-        void SetAvOffsetMs(int32_t ms) { m_avOffsetMs.store(ms); }
+        // A changed offset reaches the audio presenter immediately as a manual step.
+        void SetAvOffsetMs(int32_t ms);
         void SetLossPolicy(LossPolicy policy);
 
     private:
@@ -68,6 +69,7 @@ namespace rx
         void HandleMediaFailed(winrt::hstring const& message);
         void PostAudioFailed(std::weak_ptr<AudioPresenter> presenter, uint64_t generation);
         void HandleAudioFailed(std::shared_ptr<AudioPresenter> const& presenter);
+        void UpdateAudioTarget(bool manualStep);
         void UpdateSessionHealth(Clock::time_point now, VideoReceiver* video, AudioReceiver* audio);
         void SetError(winrt::hstring const& message);
         void SetAudioStatus(winrt::hstring const& message);

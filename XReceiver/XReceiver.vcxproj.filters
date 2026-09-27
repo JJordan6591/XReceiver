@@ -114,6 +114,9 @@
     <ClInclude Include="AudioReceiver.h">
       <Filter>Audio</Filter>
     </ClInclude>
+    <ClInclude Include="AudioPlayout.h">
+      <Filter>Audio</Filter>
+    </ClInclude>
     <ClInclude Include="AudioPresenter.h">
       <Filter>Audio</Filter>
     </ClInclude>

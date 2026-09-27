@@ -483,16 +483,22 @@ namespace rx
         }
     }
 
+    void ReceiverSession::SetAvOffsetMs(int32_t ms)
+    {
+        if (m_avOffsetMs.exchange(ms) != ms)
+        {
+            UpdateAudioTarget(true);
+        }
+    }
+
     void ReceiverSession::OnUiTick()
     {
         std::shared_ptr<VideoReceiver> video;
         std::shared_ptr<AudioReceiver> audio;
-        std::shared_ptr<AudioPresenter> audioPresenter;
         {
             std::lock_guard<std::mutex> lock(m_componentsLock);
             video = m_video;
             audio = m_audio;
-            audioPresenter = m_audioPresenter;
         }
 
         if (video && m_videoPresenter)
@@ -500,20 +506,39 @@ namespace rx
             m_videoPresenter->UpdatePtsLead(*video);
         }
 
-        if (audioPresenter && audioPresenter->IsRunning())
+        UpdateAudioTarget(false);
+        UpdateSessionHealth(Clock::now(), video.get(), audio.get());
+    }
+
+    void ReceiverSession::UpdateAudioTarget(bool manualStep)
+    {
+        std::shared_ptr<AudioPresenter> audioPresenter;
         {
-            AvSyncInputs inputs;
-            inputs.videoPipelineLatencyMs = m_settings.videoPipelineLatencyMs;
-            inputs.videoReceiveToSubmitMs = m_stats->Get(Stat::ReceiveToSubmitP50Us) / 1000.0;
-            inputs.audioOutputLatencyMs = audioPresenter->OutputLatencyMs();
-            inputs.audioJitterMs = m_stats->Get(Stat::AudioJitterUs) / 1000.0;
-            inputs.userOffsetMs = m_avOffsetMs.load();
-            inputs.minDelayMs = m_settings.audioMinDelayMs;
-            inputs.maxDelayMs = m_settings.audioMaxDelayMs;
-            audioPresenter->SetTargetDelayMs(ComputeAudioTargetDelayMs(inputs));
+            std::lock_guard<std::mutex> lock(m_componentsLock);
+            audioPresenter = m_audioPresenter;
+        }
+        if (!audioPresenter || !audioPresenter->IsRunning())
+        {
+            return;
         }
 
-        UpdateSessionHealth(Clock::now(), video.get(), audio.get());
+        AvSyncInputs inputs;
+        inputs.videoPipelineLatencyMs = m_settings.videoPipelineLatencyMs;
+        inputs.videoReceiveToSubmitMs = m_stats->Get(Stat::ReceiveToSubmitP50Us) / 1000.0;
+        inputs.audioOutputLatencyMs = audioPresenter->OutputLatencyMs();
+        inputs.audioJitterMs = m_stats->Get(Stat::AudioJitterUs) / 1000.0;
+        inputs.userOffsetMs = m_avOffsetMs.load();
+        inputs.minDelayMs = m_settings.audioMinDelayMs;
+        inputs.maxDelayMs = m_settings.audioMaxDelayMs;
+        int32_t const target = ComputeAudioTargetDelayMs(inputs);
+        if (manualStep)
+        {
+            audioPresenter->StepTargetDelayMs(target);
+        }
+        else
+        {
+            audioPresenter->SetTargetDelayMs(target);
+        }
     }
 
     void ReceiverSession::UpdateSessionHealth(Clock::time_point now, VideoReceiver* video, AudioReceiver* audio)

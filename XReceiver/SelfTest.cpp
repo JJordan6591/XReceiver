@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "AudioPlayout.h"
 #include "AudioReceiver.h"
 #include "DebugLog.h"
 #include "H264Bitstream.h"
@@ -2368,6 +2369,195 @@ namespace rx
             t.Check(covered, L"audio stage capacity covers every render up to the quantum bound");
         }
 
+        // The delay control of AudioPresenter::Render with the real step and drift classes: 44.1 kHz
+        // in, 48 kHz out, 10 ms quanta. The sender adds one quantum of input after each render.
+        struct PlayoutModel
+        {
+            static constexpr double kInPerMs = 44.1;
+            static constexpr double kOutPerMs = 48.0;
+            static constexpr size_t kQuantum = 480;
+
+            // Starts in steady playout: one quantum has already rendered against the target.
+            explicit PlayoutModel(int32_t targetMs = 60) : target(targetMs), fillMs(targetMs) { Quantum(); }
+
+            // Returns output frames of silence inserted by a manual step in this quantum.
+            size_t Quantum()
+            {
+                AudioTargetDelay::Sample const s = target.Load();
+                size_t const discard = step.Update(s, primed, kInPerMs);
+                discarded += discard;
+                fillMs = std::max(0.0, fillMs - discard / kInPerMs);
+                errorMs = fillMs - s.targetMs + step.PendingHoldMs();
+                correction = drift.Update(errorMs, now);
+                maxAbsCorrection = std::max(maxAbsCorrection, std::fabs(correction));
+                size_t const hold = step.TakeHold(kQuantum, kOutPerMs);
+                held += hold;
+                fillMs -= (kQuantum - hold) / kOutPerMs * (1.0 + correction);
+                fillMs += 10.0 + senderExcessMs;
+                now += std::chrono::milliseconds(10);
+                return hold;
+            }
+
+            void Run(int quanta)
+            {
+                for (int i = 0; i < quanta; ++i)
+                {
+                    Quantum();
+                }
+            }
+
+            bool Near(double ms) const { return std::fabs(fillMs - ms) < 0.05; }
+
+            AudioTargetDelay target;
+            ManualDelayStep step;
+            DriftTrim drift;
+            double fillMs;
+            bool primed = true;
+            double senderExcessMs = 0.0;
+            Clock::time_point now = Clock::time_point{} + std::chrono::hours(1);
+            size_t held = 0;
+            size_t discarded = 0;
+            double errorMs = 0.0;
+            double correction = 0.0;
+            double maxAbsCorrection = 0.0;
+        };
+
+        void TestManualAvOffset(TestContext& t)
+        {
+            {
+                PlayoutModel m;
+                m.target.Step(70);
+                size_t const first = m.Quantum();
+                size_t const second = m.Quantum();
+                t.Check(first == 480 && second == 0 && m.held == 480 && m.discarded == 0 && m.Near(70.0),
+                        L"av offset step: +10 ms inserts 10 ms of silence in the next quantum");
+            }
+            {
+                PlayoutModel m;
+                m.target.Step(50);
+                size_t const hold = m.Quantum();
+                t.Check(hold == 0 && m.discarded == 441 && m.Near(50.0), L"av offset step: -10 ms drops 10 ms of input in the next quantum");
+            }
+            {
+                PlayoutModel m;
+                m.target.Step(160);
+                bool const startsNow = m.Quantum() == 480;
+                m.Run(9);
+                bool const done = m.step.PendingHoldMs() == 0.0 && m.held == 4800;
+                m.Run(50);
+                t.Check(startsNow && done && m.held == 4800 && m.discarded == 0 && m.Near(160.0) && m.maxAbsCorrection == 0.0,
+                        L"av offset step: +100 ms is a bounded 100 ms gap, not a drift correction");
+            }
+            {
+                // +50 then, mid-transition, -50: the result is the latest target, not the sum of moves.
+                PlayoutModel m(150);
+                m.target.Step(200);
+                size_t const firstHold = m.Quantum();
+                m.target.Step(100);
+                size_t const secondHold = m.Quantum();
+                m.Run(20);
+                t.Check(firstHold == 480 && secondHold == 0 && m.discarded == 2646 && m.Near(100.0),
+                        L"av offset step: a sign change mid-transition lands on the latest target");
+            }
+            {
+                PlayoutModel m;
+                m.target.Step(70);
+                m.target.Step(80);
+                m.target.Step(90);
+                m.Run(10);
+                PlayoutModel back;
+                back.target.Step(70);
+                back.target.Step(60);
+                back.Run(10);
+                t.Check(m.held == 1440 && m.discarded == 0 && m.Near(90.0) && back.held == 0 && back.discarded == 0 && back.Near(60.0),
+                        L"av offset step: rapid presses are combined into one move to the latest target");
+            }
+            {
+                PlayoutModel same;
+                same.target.Step(60);
+                same.Run(5);
+                PlayoutModel ordinary;
+                ordinary.target.Set(80);
+                ordinary.Run(5);
+                t.Check(same.held == 0 && same.discarded == 0 && same.Near(60.0) && ordinary.held == 0 && ordinary.discarded == 0,
+                        L"av offset step: an unchanged value, or ordinary target movement, inserts or drops nothing");
+            }
+            {
+                PlayoutModel priming;
+                priming.primed = false;
+                priming.target.Step(160);
+                priming.Run(3);
+                t.Check(priming.held == 0 && priming.discarded == 0 && priming.step.PendingHoldMs() == 0.0,
+                        L"av offset step: while priming the new target needs no extra silence");
+            }
+            {
+                AudioTargetDelay delay(60);
+                delay.Step(5000);
+                int32_t const high = delay.Load().targetMs;
+                delay.Step(-20);
+                int32_t const low = delay.Load().targetMs;
+                ManualDelayStep step;
+                AudioTargetDelay extreme(0);
+                step.Update(extreme.Load(), true, 44.1);
+                extreme.Step(1000);
+                step.Update(extreme.Load(), true, 44.1);
+                bool const bounded = step.PendingHoldMs() == 1000.0;
+
+                AvSyncInputs inputs;
+                inputs.userOffsetMs = 500;
+                int32_t const most = ComputeAudioTargetDelayMs(inputs);
+                inputs.userOffsetMs = -500;
+                int32_t const least = ComputeAudioTargetDelayMs(inputs);
+                ReceiverSettings wild;
+                wild.avOffsetMs = -9000;
+                wild.Sanitize();
+                t.Check(high == AudioTargetDelay::kMaxMs && low == 0 && bounded && most == 300 && least == 20 && wild.avOffsetMs == -500,
+                        L"av offset step: targets, steps and saved offsets stay inside their bounds");
+            }
+            {
+                // The deadband that hid a 10 ms manual change still guards ordinary drift.
+                DriftTrim trim;
+                auto when = Clock::time_point{} + std::chrono::hours(1);
+                double correction = 0.0;
+                for (int i = 0; i < 1000; ++i)
+                {
+                    correction = std::max(correction, std::fabs(trim.Update(10.0, when)));
+                    when += std::chrono::milliseconds(10);
+                }
+                t.Check(correction == 0.0, L"av offset step: a steady 10 ms error stays inside the drift deadband");
+            }
+            {
+                // After a manual step, a sender clock 0.2 % fast is still trimmed, then released.
+                PlayoutModel m;
+                m.target.Step(160);
+                m.Run(20);
+                bool const quiet = m.maxAbsCorrection == 0.0 && m.Near(160.0);
+                m.senderExcessMs = 0.02;
+                m.Run(1500);
+                bool const trimming = m.correction > 0.0 && m.errorMs < 25.0;
+                m.senderExcessMs = 0.0;
+                m.Run(1500);
+                t.Check(quiet && trimming && m.correction == 0.0 && std::fabs(m.errorMs) < DriftTrim::kDeadbandMs,
+                        L"av offset step: drift correction resumes after the manual transition");
+            }
+            {
+                IPropertySet values = PropertySet();
+                ReceiverSettings written;
+                written.avOffsetMs = -10;
+                written.WriteToValues(values);
+                ReceiverSettings loaded = ReceiverSettings::LoadFromValues(values);
+                loaded.Sanitize();
+                bool const negative = loaded.avOffsetMs == -10 && unbox_value_or<int32_t>(values.TryLookup(L"avOffsetMs"), 0) == -10;
+                written.avOffsetMs = 10;
+                written.WriteToValues(values);
+                loaded = ReceiverSettings::LoadFromValues(values);
+                loaded.Sanitize();
+                t.Check(negative && loaded.avOffsetMs == 10 && ReceiverSettings::kCurrentSettingsVersion == 3 &&
+                            unbox_value_or<int32_t>(values.TryLookup(L"settingsVersion"), 0) == 3,
+                        L"av offset step: saved offset key, sign and schema version are unchanged");
+            }
+        }
+
         IPropertySet MakeSettingsMap()
         {
             return PropertySet();
@@ -3046,6 +3236,7 @@ namespace rx
         TestAudioTimestampReset(t);
         TestResampler(t);
         TestAudioStage(t);
+        TestManualAvOffset(t);
         TestLifecycle(t);
         TestReceiverSettings(t);
         TestHostileInput(t);

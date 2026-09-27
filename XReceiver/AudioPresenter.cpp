@@ -28,11 +28,6 @@ namespace rx
 {
     namespace
     {
-        constexpr double kDeadbandMs = 10.0;
-        constexpr double kReleaseMs = 3.0;
-        constexpr double kMaxCorrection = 0.005;    // 0.5 %
-        constexpr double kCorrectionPerMs = 0.0001; // 10 ms error -> 0.1 %
-
         // RequiredSamples is normally one quantum and a few after a stall. A request beyond
         // this many quanta is rendered as silence rather than growing the stage.
         constexpr size_t kMaxQuantaPerRender = 8;
@@ -158,7 +153,7 @@ namespace rx
             m_resampler.Configure(m_baseRatio);
             size_t const quantum = static_cast<size_t>(std::max(m_graph.SamplesPerQuantum(), 0));
             size_t const stageFrames = std::max(kMinStageFrames,
-                SincResampler::StageFrames(quantum * kMaxQuantaPerRender, m_baseRatio * (1.0 + kMaxCorrection)));
+                SincResampler::StageFrames(quantum * kMaxQuantaPerRender, m_baseRatio * (1.0 + DriftTrim::kMaxCorrection)));
             m_stage.assign(stageFrames * m_channels, 0.0f);
             ResetPlayout();
 
@@ -334,9 +329,8 @@ namespace rx
         m_staged = SincResampler::kHistory;
         m_position = static_cast<double>(SincResampler::kHistory);
         m_primed = false;
-        m_errorEmaMs = 0.0;
-        m_errorSustained = false;
-        m_correction = 0.0;
+        m_manualStep.Reset();
+        m_drift.Reset();
     }
 
     void AudioPresenter::Render(float* out, size_t frames)
@@ -349,14 +343,23 @@ namespace rx
             ResetPlayout();
         }
 
+        // A manual A/V offset change moves playout now instead of waiting for drift correction:
+        // an earlier target drops buffered input here, a later one inserts silence below.
+        AudioTargetDelay::Sample const delay = m_target.Load();
+        size_t const discard = m_manualStep.Update(delay, m_primed, framesPerMs);
+        if (discard > 0)
+        {
+            m_ring->Discard(discard);
+        }
+
         size_t const fill = m_ring->Available() + StagedAhead();
-        size_t const target = static_cast<size_t>(m_targetMs.load() * framesPerMs);
-        size_t const hardCap = static_cast<size_t>(std::max(m_maxMs.load(), m_targetMs.load() + 50) * framesPerMs);
+        size_t const target = static_cast<size_t>(delay.targetMs * framesPerMs);
+        size_t const hardCap = static_cast<size_t>(std::max(m_maxMs.load(), delay.targetMs + 50) * framesPerMs);
 
         int64_t const fillUs = static_cast<int64_t>(fill / framesPerMs * 1000.0);
         m_stats->Set(Stat::AudioFillUs, fillUs);
         m_stats->Raise(Stat::AudioFillHighUs, fillUs);
-        m_stats->Set(Stat::AudioTargetDelayMs, m_targetMs.load());
+        m_stats->Set(Stat::AudioTargetDelayMs, delay.targetMs);
 
         if (!m_primed)
         {
@@ -373,34 +376,30 @@ namespace rx
             size_t const excess = fill - target;
             size_t const dropped = m_ring->Discard(excess);
             m_stats->Add(Stat::AudioHardCapDropFrames, static_cast<int64_t>(dropped));
-            m_errorEmaMs = 0.0;
-            m_errorSustained = false;
-            m_correction = 0.0;
+            m_drift.Reset();
         }
 
-        double const errorMs = (static_cast<double>(m_ring->Available() + StagedAhead()) - static_cast<double>(target)) / framesPerMs;
-        m_errorEmaMs += 0.02 * (errorMs - m_errorEmaMs);
-        auto const now = Clock::now();
-        if (std::fabs(m_errorEmaMs) > kDeadbandMs)
-        {
-            if (!m_errorSustained)
-            {
-                m_errorSustained = true;
-                m_errorSince = now;
-            }
-            else if (now - m_errorSince > std::chrono::seconds(1))
-            {
-                m_correction = std::clamp(m_errorEmaMs * kCorrectionPerMs, -kMaxCorrection, kMaxCorrection);
-            }
-        }
-        else if (std::fabs(m_errorEmaMs) < kReleaseMs)
-        {
-            m_errorSustained = false;
-            m_correction = 0.0;
-        }
-        m_stats->Set(Stat::AudioDriftPpm, static_cast<int64_t>(m_correction * 1e6));
+        // Silence still owed by a manual step counts as fill, so the step is not mistaken for drift.
+        double const errorMs = (static_cast<double>(m_ring->Available() + StagedAhead()) - static_cast<double>(target)) / framesPerMs +
+                               m_manualStep.PendingHoldMs();
+        double const correction = m_drift.Update(errorMs, Clock::now());
+        m_stats->Set(Stat::AudioDriftPpm, static_cast<int64_t>(correction * 1e6));
 
-        double const ratio = m_baseRatio * (1.0 + m_correction);
+        // While a later target is pending, emit silence without consuming input; the ring grows by
+        // exactly the held time and playout resumes from the same position.
+        size_t const hold = m_manualStep.TakeHold(frames, framesPerMs / m_baseRatio);
+        if (hold > 0)
+        {
+            std::memset(out, 0, hold * m_channels * sizeof(float));
+            out += hold * m_channels;
+            frames -= hold;
+            if (frames == 0)
+            {
+                return;
+            }
+        }
+
+        double const ratio = m_baseRatio * (1.0 + correction);
         size_t const needed = SincResampler::FramesNeeded(m_position, frames, ratio);
         if (needed * m_channels > m_stage.size())
         {

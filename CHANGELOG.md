@@ -35,4 +35,4 @@ XReceiver is an Xbox Developer Mode app. It receives H.264 video (UDP 5000) and 
 
 ## Unreleased
 
-Nothing yet beyond the candidate above.
+- A/V offset changes apply on the next audio quantum as a one-time gap (later) or skip (earlier), instead of drifting in over 20 to 40 seconds. A 10 ms step is no longer lost in the drift deadband

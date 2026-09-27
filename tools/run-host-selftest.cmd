@@ -12,7 +12,10 @@ if not exist "%VSWHERE%" (
   exit /b 1
 )
 set "VSINSTALL="
-for /f "usebackq delims=" %%I in (`"%VSWHERE%" -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%I"
+for /f "usebackq delims=" %%I in (`"%VSWHERE%" -all -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+  echo %%I | findstr /I /C:"\2022\\" >nul
+  if not errorlevel 1 set "VSINSTALL=%%I"
+)
 if not defined VSINSTALL (
   echo Visual Studio 2022 C++ x64 tools were not found.
   popd
@@ -72,3 +75,4 @@ set "TESTERR=%ERRORLEVEL%"
 popd
 popd
 exit /b %TESTERR%
+

@@ -235,7 +235,19 @@ namespace rx
         }
 
         int64_t const frames = static_cast<int64_t>(packet.payloadSize / kL16BytesPerFrame);
-        int64_t const extTimestamp = m_timestamp.Unwrap(packet.timestamp);
+        int64_t extTimestamp = m_timestamp.Unwrap(packet.timestamp);
+        if (m_hasExpected && m_expectedTimestamp - extTimestamp > kMaxConcealFrames)
+        {
+            // The sender restarted its RTP clock while keeping its SSRC and sequence. Waiting for the
+            // old timeline to catch up would drop every packet as late, so follow the new one.
+            m_stats->Add(Stat::AudioDiscontinuities);
+            m_timestamp.Reset();
+            m_transit.Reset();
+            extTimestamp = m_timestamp.Unwrap(packet.timestamp);
+            m_hasExpected = false;
+            m_ring->RequestFlush();
+            m_fadeInPending = true;
+        }
         m_transit.Add(arrival, extTimestamp, kL16SampleRate);
 
         if (!m_hasExpected)

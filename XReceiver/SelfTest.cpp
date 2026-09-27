@@ -2125,6 +2125,167 @@ namespace rx
                     L"audio idle timer is reset only by accepted packets");
         }
 
+        // Feeds 400-frame L16 packets to one receiver and reports what each produced. The ring is
+        // drained after every packet, so Written is exactly that packet's output.
+        class AudioTimelineHarness
+        {
+        public:
+            static constexpr uint32_t kFrames = 400;
+
+            AudioTimelineHarness() :
+                stats(std::make_shared<ReceiverStats>()),
+                pcm(std::make_shared<PcmRingBuffer>(44100, 2)),
+                receiver(ReceiverSettings{}, stats, pcm)
+            {
+            }
+
+            size_t Send(uint16_t sequence, uint32_t timestamp, uint32_t ssrc = 0x55)
+            {
+                Bytes const packet = MakeRtp(sequence, timestamp, ssrc, false, Bytes(kFrames * 4, 0x10));
+                receiver.ProcessDatagram(packet.data(), packet.size(), now);
+                now += std::chrono::microseconds(9070);
+                size_t const written = pcm->Available();
+                pcm->Discard(written);
+                return written;
+            }
+
+            // Sends count in-order packets continuing both counters; true if each wrote a full packet.
+            bool Continue(uint16_t& sequence, uint32_t& timestamp, int count, uint32_t ssrc = 0x55)
+            {
+                bool full = true;
+                for (int i = 0; i < count; ++i)
+                {
+                    full = Send(sequence++, timestamp, ssrc) == kFrames && full;
+                    timestamp += kFrames;
+                }
+                return full;
+            }
+
+            int64_t Get(Stat stat) const { return stats->Get(stat); }
+
+            std::shared_ptr<ReceiverStats> stats;
+            std::shared_ptr<PcmRingBuffer> pcm;
+            AudioReceiver receiver;
+            Clock::time_point now = Clock::now();
+        };
+
+        void TestAudioTimestampReset(TestContext& t)
+        {
+            constexpr uint32_t kThreshold = 44100 / 5;  // 200 ms of frames
+            uint32_t constexpr kFrames = AudioTimelineHarness::kFrames;
+
+            {
+                // Below the threshold: an overlap, not a reset. The packet is late and nothing resyncs.
+                AudioTimelineHarness h;
+                uint16_t seq = 1;
+                uint32_t ts = 100000;
+                bool const warm = h.Continue(seq, ts, 3);
+                h.pcm->ConsumeFlushRequest();
+                size_t const written = h.Send(seq++, ts - 4000);
+                t.Check(warm && written == 0 && h.Get(Stat::AudioLate) == 1 && h.Get(Stat::AudioDiscontinuities) == 0 &&
+                            !h.pcm->ConsumeFlushRequest(),
+                        L"audio ts reset: a backward step below 200 ms is late, not a reset");
+            }
+            {
+                AudioTimelineHarness h;
+                uint16_t seq = 1;
+                uint32_t ts = 100000;
+                h.Continue(seq, ts, 3);
+                size_t const written = h.Send(seq++, ts - kThreshold);
+                t.Check(written == 0 && h.Get(Stat::AudioLate) == 1 && h.Get(Stat::AudioDiscontinuities) == 0,
+                        L"audio ts reset: a backward step of exactly 200 ms is not a reset");
+            }
+            {
+                // One frame beyond the threshold resynchronizes and plays the packet at once.
+                AudioTimelineHarness h;
+                uint16_t seq = 1;
+                uint32_t ts = 100000;
+                h.Continue(seq, ts, 3);
+                h.pcm->ConsumeFlushRequest();
+                uint32_t reset = ts - kThreshold - 1;
+                size_t const first = h.Send(seq++, reset);
+                bool const flushed = h.pcm->ConsumeFlushRequest();
+                reset += kFrames;
+                bool const following = h.Continue(seq, reset, 20);
+                t.Check(first == kFrames && flushed && h.Get(Stat::AudioDiscontinuities) == 1 && h.Get(Stat::AudioLate) == 0 &&
+                            following && h.Get(Stat::AudioConcealedFrames) == 0,
+                        L"audio ts reset: a backward step beyond 200 ms resyncs on the first packet");
+                t.Check(h.Get(Stat::AudioStreamRestarts) == 0 && h.Get(Stat::AudioLost) == 0,
+                        L"audio ts reset: same SSRC with continuing sequence is not a stream restart");
+            }
+            {
+                // The reported failure: the timestamp jumps back ten seconds and audio used to stay
+                // silent until the old timeline caught up.
+                AudioTimelineHarness h;
+                uint16_t seq = 60000;
+                uint32_t ts = 5000000;
+                h.Continue(seq, ts, 5);
+                uint32_t reset = ts - 441000;
+                bool const recovered = h.Continue(seq, reset, 200);
+                t.Check(recovered && h.Get(Stat::AudioLate) == 0 && h.Get(Stat::AudioDiscontinuities) == 1,
+                        L"audio ts reset: ten seconds backward recovers immediately across sequence wrap, one resync only");
+            }
+            {
+                // A reset lands in the middle of normal reordering: the jitter buffer still orders by
+                // sequence, and the reset is applied once when the first new-timeline packet plays.
+                AudioTimelineHarness h;
+                uint16_t seq = 1;
+                uint32_t ts = 100000;
+                h.Continue(seq, ts, 3);
+                uint32_t const reset = 7;
+                size_t const ahead = h.Send(static_cast<uint16_t>(seq + 1), reset + kFrames);
+                size_t const filled = h.Send(seq, reset);
+                seq += 2;
+                uint32_t next = reset + 2 * kFrames;
+                bool const following = h.Continue(seq, next, 10);
+                t.Check(ahead == 0 && filled == 2 * kFrames && following && h.Get(Stat::AudioReordered) == 1 &&
+                            h.Get(Stat::AudioDiscontinuities) == 1 && h.Get(Stat::AudioLate) == 0,
+                        L"audio ts reset: reordering around a reset still plays in sequence order");
+            }
+            {
+                AudioTimelineHarness h;
+                uint16_t seq = 1;
+                uint32_t ts = 0xFFFFFFFFu - 3 * kFrames + 1;
+                bool const across = h.Continue(seq, ts, 12);
+                t.Check(across && h.Get(Stat::AudioDiscontinuities) == 0 && h.Get(Stat::AudioLate) == 0 &&
+                            h.Get(Stat::AudioConcealedFrames) == 0,
+                        L"audio ts reset: 32-bit timestamp wrap is not mistaken for a reset");
+            }
+            {
+                // Forward behavior is unchanged: a short gap is concealed, a long one flushes and plays.
+                AudioTimelineHarness h;
+                uint16_t seq = 1;
+                uint32_t ts = 100000;
+                h.Continue(seq, ts, 3);
+                size_t const shortGap = h.Send(seq++, ts + 800);
+                ts += 800 + kFrames;
+                h.pcm->ConsumeFlushRequest();
+                size_t const atLimit = h.Send(seq++, ts + kThreshold);
+                ts += kThreshold + kFrames;
+                bool const limitNoFlush = !h.pcm->ConsumeFlushRequest();
+                size_t const longGap = h.Send(seq++, ts + kThreshold + 1);
+                t.Check(shortGap == 800 + kFrames && atLimit == kThreshold + kFrames && limitNoFlush &&
+                            longGap == kFrames && h.pcm->ConsumeFlushRequest() && h.Get(Stat::AudioDiscontinuities) == 1 &&
+                            h.Get(Stat::AudioConcealedFrames) == 800 + kThreshold,
+                        L"audio ts reset: forward gaps conceal up to 200 ms and flush beyond it");
+            }
+            {
+                // A new SSRC with an earlier timestamp is a stream restart, handled by takeover probation.
+                AudioTimelineHarness h;
+                uint16_t seq = 1;
+                uint32_t ts = 5000000;
+                h.Continue(seq, ts, 3);
+                uint16_t otherSeq = 900;
+                uint32_t otherTs = 1000;
+                size_t const probation = h.Send(otherSeq++, otherTs, 0x66);
+                otherTs += kFrames;
+                bool const switched = h.Continue(otherSeq, otherTs, 10, 0x66);
+                t.Check(probation == 0 && switched && h.Get(Stat::AudioStreamRestarts) == 1 && h.Get(Stat::AudioForeignSsrc) == 1 &&
+                            h.Get(Stat::AudioDiscontinuities) == 0 && h.Get(Stat::AudioLate) == 0,
+                        L"audio ts reset: a changed SSRC restarts the stream without a timestamp resync");
+            }
+        }
+
         // Largest deviation from an ideal sine when resampling 44.1 kHz to 48 kHz. Images and
         // aliases add to the error, so a small value also means good stopband rejection.
         double ResampleSineError(SincResampler const& resampler, double hz, uint32_t channels)
@@ -2882,6 +3043,7 @@ namespace rx
         TestVideoIntegration(t);
         TestAudio(t);
         TestAudioActivity(t);
+        TestAudioTimestampReset(t);
         TestResampler(t);
         TestAudioStage(t);
         TestLifecycle(t);

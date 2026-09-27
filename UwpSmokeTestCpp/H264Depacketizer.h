@@ -20,6 +20,10 @@ namespace rx
         {
             size_t maxNalBytes = 2 * 1024 * 1024;
             size_t maxAuBytes = 4 * 1024 * 1024;
+            // A real IDR at MTU size stays well under these. They stop fragment/aggregation storms.
+            size_t maxFuFragments = 8192;
+            size_t maxStapNals = 32;
+            size_t maxNals = 256;
         };
 
         struct Counters
@@ -90,6 +94,7 @@ namespace rx
         bool m_firstSliceAtMb0 = false;
 
         bool m_fuActive = false;
+        size_t m_fuFragments = 0;
         size_t m_fuStartOffset = 0;
         uint8_t m_fuType = 0;
         uint8_t m_fuNri = 0;

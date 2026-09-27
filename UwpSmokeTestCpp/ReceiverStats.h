@@ -133,7 +133,23 @@ namespace rx
             }
         }
 
-        void Add(Stat s, int64_t delta = 1) { m_values[Index(s)].fetch_add(delta, std::memory_order_relaxed); }
+        void Add(Stat s, int64_t delta = 1)
+        {
+            if (delta <= 0)
+            {
+                return;
+            }
+            auto& value = m_values[Index(s)];
+            int64_t current = value.load(std::memory_order_relaxed);
+            while (true)
+            {
+                int64_t const next = current > INT64_MAX - delta ? INT64_MAX : current + delta;
+                if (value.compare_exchange_weak(current, next, std::memory_order_relaxed))
+                {
+                    return;
+                }
+            }
+        }
         void Set(Stat s, int64_t value) { m_values[Index(s)].store(value, std::memory_order_relaxed); }
         int64_t Get(Stat s) const { return m_values[Index(s)].load(std::memory_order_relaxed); }
 

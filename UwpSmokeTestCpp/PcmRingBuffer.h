@@ -16,10 +16,15 @@ namespace rx
     {
     public:
         PcmRingBuffer(size_t capacityFrames, uint32_t channels) :
-            m_capacity(capacityFrames),
-            m_channels(channels),
-            m_data(capacityFrames * channels, 0.0f)
+            m_capacity(0),
+            m_channels(channels == 0 ? 1 : channels)
         {
+            if (channels == 0 || capacityFrames > SIZE_MAX / m_channels)
+            {
+                return;
+            }
+            m_capacity = capacityFrames;
+            m_data.assign(capacityFrames * m_channels, 0.0f);
         }
 
         size_t CapacityFrames() const { return m_capacity; }
@@ -33,6 +38,10 @@ namespace rx
         // Producer. Returns frames written; the remainder did not fit.
         size_t Write(float const* frames, size_t count)
         {
+            if (m_capacity == 0 || frames == nullptr || count == 0)
+            {
+                return 0;
+            }
             uint64_t const write = m_write.load(std::memory_order_relaxed);
             uint64_t const read = m_read.load(std::memory_order_acquire);
             size_t const freeFrames = m_capacity - static_cast<size_t>(write - read);
@@ -51,6 +60,10 @@ namespace rx
         // Consumer. Returns frames read.
         size_t Read(float* out, size_t count)
         {
+            if (m_capacity == 0 || out == nullptr || count == 0)
+            {
+                return 0;
+            }
             uint64_t const read = m_read.load(std::memory_order_relaxed);
             uint64_t const write = m_write.load(std::memory_order_acquire);
             size_t const available = static_cast<size_t>(write - read);

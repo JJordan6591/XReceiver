@@ -127,6 +127,7 @@
     <ClInclude Include="AudioPresenter.h" />
     <ClInclude Include="AudioReceiver.h" />
     <ClInclude Include="BoundedQueue.h" />
+    <ClInclude Include="Checked.h" />
     <ClInclude Include="DebugLog.h" />
     <ClInclude Include="FrameDelivery.h" />
     <ClInclude Include="H264AccessUnit.h" />

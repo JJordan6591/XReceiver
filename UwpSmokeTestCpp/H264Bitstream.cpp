@@ -1,8 +1,14 @@
 #include "pch.h"
 #include "H264Bitstream.h"
 
+#include "Checked.h"
+
 namespace rx
 {
+    namespace
+    {
+        constexpr size_t kMaxSpsBytes = 2 * 1024 * 1024;
+    }
     std::vector<uint8_t> RemoveEmulationPrevention(uint8_t const* data, size_t size)
     {
         std::vector<uint8_t> out;
@@ -24,10 +30,16 @@ namespace rx
 
     uint32_t BitReader::ReadBits(int count)
     {
+        if (count < 0 || count > 32 || m_data == nullptr || m_size > (SIZE_MAX / 8))
+        {
+            m_ok = false;
+            return 0;
+        }
         uint32_t value = 0;
+        size_t const bitCount = m_size * 8;
         for (int i = 0; i < count; ++i)
         {
-            if (m_bit >= m_size * 8)
+            if (m_bit >= bitCount)
             {
                 m_ok = false;
                 return 0;
@@ -63,7 +75,12 @@ namespace rx
         {
             return 0;
         }
-        uint64_t const value = ((uint64_t{ 1 } << leadingZeros) - 1) + ReadBits(leadingZeros);
+        uint32_t const suffix = ReadBits(leadingZeros);
+        if (!m_ok)
+        {
+            return 0;
+        }
+        uint64_t const value = ((uint64_t{ 1 } << leadingZeros) - 1) + suffix;
         return value > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(value);
     }
 
@@ -196,7 +213,7 @@ namespace rx
     bool ParseSps(uint8_t const* nal, size_t size, SpsInfo& out)
     {
         out = SpsInfo{};
-        if (nal == nullptr || size < 4 || (nal[0] & 0x1F) != 7)
+        if (nal == nullptr || size < 4 || size > kMaxSpsBytes || (nal[0] & 0x1F) != 7)
         {
             return false;
         }
@@ -314,8 +331,18 @@ namespace rx
             cropUnitY = subHeight * frameHeightFactor;
         }
 
-        uint64_t const cropX = uint64_t{ cropLeft + cropRight } * cropUnitX;
-        uint64_t const cropY = uint64_t{ cropTop + cropBottom } * cropUnitY;
+        uint64_t const cropSumX = uint64_t{ cropLeft } + cropRight;
+        uint64_t const cropSumY = uint64_t{ cropTop } + cropBottom;
+        if (cropUnitX != 0 && cropSumX > UINT64_MAX / cropUnitX)
+        {
+            return false;
+        }
+        if (cropUnitY != 0 && cropSumY > UINT64_MAX / cropUnitY)
+        {
+            return false;
+        }
+        uint64_t const cropX = cropSumX * cropUnitX;
+        uint64_t const cropY = cropSumY * cropUnitY;
         if (cropX >= width || cropY >= height)
         {
             return false;

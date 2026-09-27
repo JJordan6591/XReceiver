@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "H264Depacketizer.h"
 
+#include "Checked.h"
+
 namespace rx
 {
     namespace
@@ -37,6 +39,7 @@ namespace rx
         m_firstSliceSeen = false;
         m_firstSliceAtMb0 = false;
         m_fuActive = false;
+        m_fuFragments = 0;
         m_fuStartOffset = 0;
     }
 
@@ -55,7 +58,8 @@ namespace rx
         if (gap)
         {
             ++m_counters.sequenceGaps;
-            m_counters.missingPackets += static_cast<uint64_t>(info.extSequence - m_lastSequence - 1);
+            m_counters.missingPackets = SaturatingAdd(m_counters.missingPackets,
+                static_cast<uint64_t>(info.extSequence - m_lastSequence - 1));
         }
         m_hasLastSequence = true;
         m_lastSequence = info.extSequence;
@@ -144,6 +148,7 @@ namespace rx
         m_au->firstPacketTime = info.arrival;
         m_overflow = false;
         m_fuActive = false;
+        m_fuFragments = 0;
         m_headUnverified = headUnverified;
         m_firstSliceSeen = false;
         m_firstSliceAtMb0 = false;
@@ -199,6 +204,7 @@ namespace rx
         m_au.reset();
         m_overflow = false;
         m_fuActive = false;
+        m_fuFragments = 0;
         m_headUnverified = false;
         if (m_callback)
         {
@@ -225,7 +231,8 @@ namespace rx
         {
             return false;
         }
-        if (m_au->data.size() + additionalBytes > m_limits.maxAuBytes)
+        size_t needed = 0;
+        if (!CheckedAdd(m_au->data.size(), additionalBytes, needed) || needed > m_limits.maxAuBytes)
         {
             ++m_counters.oversize;
             m_overflow = true;
@@ -247,7 +254,7 @@ namespace rx
             MarkCorrupt(true);
             return;
         }
-        if (size > m_limits.maxNalBytes)
+        if (size > m_limits.maxNalBytes || m_au->nals.size() >= m_limits.maxNals)
         {
             ++m_counters.oversize;
             MarkCorrupt(true);
@@ -320,21 +327,25 @@ namespace rx
         // Validate every aggregated unit before appending any of them.
         bool valid = size >= 4;
         size_t offset = 1;
+        size_t members = 0;
         while (valid && offset < size)
         {
-            if (offset + 2 > size)
+            size_t lengthEnd = 0;
+            if (!CheckedAdd(offset, 2, lengthEnd) || lengthEnd > size)
             {
                 valid = false;
                 break;
             }
             size_t const nalSize = (static_cast<size_t>(payload[offset]) << 8) | payload[offset + 1];
-            offset += 2;
-            if (nalSize == 0 || offset + nalSize > size || !IsNalUnitType(payload[offset] & 0x1F))
+            offset = lengthEnd;
+            size_t nalEnd = 0;
+            if (nalSize == 0 || !CheckedAdd(offset, nalSize, nalEnd) || nalEnd > size || !IsNalUnitType(payload[offset] & 0x1F) ||
+                ++members > m_limits.maxStapNals)
             {
                 valid = false;
                 break;
             }
-            offset += nalSize;
+            offset = nalEnd;
         }
         if (!valid)
         {
@@ -382,13 +393,19 @@ namespace rx
             reject(m_counters.forbiddenBit);
             return;
         }
-        if ((start && end) || !IsNalUnitType(nalType))
+        if ((start && end) || !IsNalUnitType(nalType) || fragmentSize == 0)
         {
             // RFC 6184 5.8: a NAL unit must not be sent as a single FU, and FU-A cannot carry
-            // aggregation or fragmentation units.
+            // aggregation or fragmentation units. An empty fragment is not a valid piece.
             reject(m_counters.fuaErrors);
             return;
         }
+        if (m_fuFragments >= m_limits.maxFuFragments)
+        {
+            reject(m_counters.oversize);
+            return;
+        }
+        ++m_fuFragments;
 
         if (start)
         {
@@ -397,12 +414,14 @@ namespace rx
                 // The previous fragmented NAL never received its end fragment.
                 reject(m_counters.fuaErrors);
             }
+            m_fuFragments = 1;
             uint8_t const header = static_cast<uint8_t>(nri | nalType);
             if (IsSliceType(nalType))
             {
                 NoteSliceStart(header, fragment, fragmentSize);
             }
-            if (!Fits(sizeof(h264::kStartCode) + 1 + fragmentSize))
+            size_t headerAndBody = 0;
+            if (!CheckedAdd(sizeof(h264::kStartCode) + 1, fragmentSize, headerAndBody) || !Fits(headerAndBody))
             {
                 return;
             }
@@ -434,7 +453,8 @@ namespace rx
             return;
         }
         size_t const nalSoFar = m_au->data.size() - (m_fuStartOffset + sizeof(h264::kStartCode));
-        if (nalSoFar + fragmentSize > m_limits.maxNalBytes)
+        size_t nalBytes = 0;
+        if (!CheckedAdd(nalSoFar, fragmentSize, nalBytes) || nalBytes > m_limits.maxNalBytes)
         {
             reject(m_counters.oversize);
             return;
@@ -458,6 +478,7 @@ namespace rx
             return;
         }
         m_fuActive = false;
+        m_fuFragments = 0;
 
         NalRef ref;
         ref.offset = static_cast<uint32_t>(m_fuStartOffset + sizeof(h264::kStartCode));
@@ -479,5 +500,6 @@ namespace rx
             m_au->data.resize(m_fuStartOffset);
         }
         m_fuActive = false;
+        m_fuFragments = 0;
     }
 }

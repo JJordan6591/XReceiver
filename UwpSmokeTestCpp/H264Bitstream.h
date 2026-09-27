@@ -20,7 +20,15 @@ namespace rx
         int32_t ReadSe();
         bool Ok() const { return m_ok; }
         void Fail() { m_ok = false; }
-        size_t BitsLeft() const { return m_size * 8 > m_bit ? m_size * 8 - m_bit : 0; }
+        size_t BitsLeft() const
+        {
+            if (m_size > (SIZE_MAX / 8))
+            {
+                return 0;
+            }
+            size_t const bits = m_size * 8;
+            return bits > m_bit ? bits - m_bit : 0;
+        }
 
     private:
         uint8_t const* m_data;

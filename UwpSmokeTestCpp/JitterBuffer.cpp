@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "Checked.h"
+
 namespace rx
 {
     JitterBuffer::JitterBuffer() : JitterBuffer(Config{})
@@ -27,7 +29,18 @@ namespace rx
             m_config.capacity = static_cast<size_t>(m_config.reorderWindow) + 1;
         }
         m_slots.assign(m_config.capacity, Slot{});
-        m_storage.assign(m_config.capacity * m_config.maxPacketBytes, 0);
+        size_t storageBytes = 0;
+        if (m_config.maxPacketBytes == 0 || !CheckedMul(m_config.capacity, m_config.maxPacketBytes, storageBytes))
+        {
+            m_config.maxPacketBytes = 2048;
+            if (m_config.capacity == 0 || m_config.capacity > SIZE_MAX / m_config.maxPacketBytes)
+            {
+                m_config.capacity = 512;
+            }
+            storageBytes = m_config.capacity * m_config.maxPacketBytes;
+            m_slots.assign(m_config.capacity, Slot{});
+        }
+        m_storage.assign(storageBytes, 0);
         Reset();
     }
 

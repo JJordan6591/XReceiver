@@ -173,6 +173,14 @@ namespace rx
             break;
         }
 
+        // A partial sample frame is not playable. Reject it before it counts as sender activity.
+        if (packet.payloadSize % kL16BytesPerFrame != 0)
+        {
+            m_stats->Add(Stat::AudioPartialFrames);
+            m_stats->Add(Stat::AudioInvalid);
+            return;
+        }
+
         // Rejected datagrams must not keep the session in Receiving or reset the idle timer.
         m_lastPacketTicks = now.time_since_epoch().count();
         m_everReceived = true;
@@ -218,14 +226,10 @@ namespace rx
 
     void AudioReceiver::OnOrderedPacket(RtpPacketView const& packet, int64_t, Clock::time_point arrival)
     {
-        if (packet.payloadSize < kL16BytesPerFrame)
+        if (packet.payloadSize < kL16BytesPerFrame || packet.payloadSize % kL16BytesPerFrame != 0)
         {
             m_stats->Add(Stat::AudioInvalid);
             return;
-        }
-        if (packet.payloadSize % kL16BytesPerFrame != 0)
-        {
-            m_stats->Add(Stat::AudioPartialFrames);
         }
 
         int64_t const frames = static_cast<int64_t>(packet.payloadSize / kL16BytesPerFrame);

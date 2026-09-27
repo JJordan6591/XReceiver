@@ -2323,6 +2323,266 @@ namespace rx
             bool const repeated = failed.Set();
             t.Check(first && !repeated && failed.IsSet(), L"lifecycle: a failure is reported once");
         }
+
+        void TestHostileInput(TestContext& t)
+        {
+            RtpPacketView view;
+
+            bool truncated = true;
+            for (size_t n = 0; n < kRtpHeaderSize; ++n)
+            {
+                Bytes bytes(n, 0x80);
+                truncated = truncated && ParseRtpPacket(bytes.data(), bytes.size(), view) == RtpParseResult::TooShort;
+            }
+            t.Check(truncated, L"hostile rtp: every fixed-header truncation is rejected");
+
+            Bytes csrcShort = MakeRtp(1, 0, 1, false, { 1, 2, 3 });
+            csrcShort[0] = static_cast<uint8_t>(0x80 | 15);
+            t.Check(ParseRtpPacket(csrcShort.data(), csrcShort.size(), view) == RtpParseResult::BadCsrc,
+                    L"hostile rtp: CSRC count larger than the datagram");
+
+            Bytes extHeader = MakeRtp(1, 0, 1, false, { 0xBE, 0xDE });
+            extHeader[0] |= 0x10;
+            t.Check(ParseRtpPacket(extHeader.data(), extHeader.size(), view) == RtpParseResult::BadExtension,
+                    L"hostile rtp: truncated extension header");
+
+            Bytes extFit = MakeRtp(1, 0, 1, false, { 0xBE, 0xDE, 0x00, 0x01, 1, 2, 3, 4, 0x55 });
+            extFit[0] |= 0x10;
+            Bytes extPast = extFit;
+            extPast[15] = 2;
+            t.Check(ParseRtpPacket(extFit.data(), extFit.size(), view) == RtpParseResult::Ok && view.payloadSize == 1 &&
+                        ParseRtpPacket(extPast.data(), extPast.size(), view) == RtpParseResult::BadExtension,
+                    L"hostile rtp: extension length at and past the datagram");
+
+            Bytes padOk = MakeRtp(1, 0, 1, false, { 9, 9, 0, 2 });
+            padOk[0] |= 0x20;
+            Bytes padZero = MakeRtp(1, 0, 1, false, { 9, 9, 0 });
+            padZero[0] |= 0x20;
+            Bytes padHuge = MakeRtp(1, 0, 1, false, { 9, 9, 50 });
+            padHuge[0] |= 0x20;
+            t.Check(ParseRtpPacket(padOk.data(), padOk.size(), view) == RtpParseResult::Ok && view.payloadSize == 2 &&
+                        ParseRtpPacket(padZero.data(), padZero.size(), view) == RtpParseResult::BadPadding &&
+                        ParseRtpPacket(padHuge.data(), padHuge.size(), view) == RtpParseResult::BadPadding,
+                    L"hostile rtp: valid padding, zero padding and padding past the payload");
+
+            RtpStreamTracker tracker;
+            RtpAdmissionRules rules;
+            auto const now = Clock::now();
+            Bytes media(8, 0x11);
+            t.Check(AdmitRtpPacket(MakeRtp(1, 0, 1, false, media, 97).data(), 12 + media.size(), rules, tracker, now, view) ==
+                        RtpAdmission::WrongPayloadType,
+                    L"hostile rtp: wrong payload type");
+            Bytes empty = MakeRtp(1, 0, 1, false, {});
+            t.Check(ParseRtpPacket(empty.data(), empty.size(), view) == RtpParseResult::EmptyPayload, L"hostile rtp: empty payload");
+            Bytes huge = MakeRtp(1, 0, 1, false, Bytes(3000, 1));
+            t.Check(AdmitRtpPacket(huge.data(), huge.size(), rules, tracker, now, view) == RtpAdmission::TooLarge && !tracker.Locked(),
+                    L"hostile rtp: oversized datagram does not lock a stream");
+
+            SequenceUnwrapper seq;
+            TimestampUnwrapper ts;
+            int64_t const previousSequence = seq.Unwrap(65535);
+            int64_t const wrappedSequence = seq.Unwrap(0);
+            int64_t const previousTimestamp = ts.Unwrap(0xFFFFFFF0u);
+            int64_t const wrappedTimestamp = ts.Unwrap(0x10u);
+            t.Check(wrappedSequence == previousSequence + 1 && wrappedTimestamp > previousTimestamp, L"hostile rtp: sequence and timestamp wrap");
+
+            RtpStreamTracker churn;
+            RtpPacketView a;
+            a.ssrc = 1;
+            a.sequence = 1;
+            churn.Check(a, now, std::chrono::seconds(1));
+            bool ignored = true;
+            for (uint32_t ssrc = 2; ssrc < 20; ++ssrc)
+            {
+                RtpPacketView foreign = a;
+                foreign.ssrc = ssrc;
+                foreign.sequence = 1;
+                ignored = ignored && churn.Check(foreign, now, std::chrono::seconds(1)) == TrackDecision::Ignore;
+            }
+            t.Check(ignored && churn.Ssrc() == 1, L"hostile rtp: rapid SSRC alternation does not take over");
+
+            {
+                DepackHarness h;
+                h.Send(1, 1000, true, {});
+                h.Send(2, 2000, true, Bytes{ 0x80 | 1, 0x00 });
+                h.Send(3, 3000, true, kPSlice);
+                t.Check(h.Pattern() == L"IIC", L"hostile h264: empty and forbidden NAL rejected, valid single NAL kept");
+            }
+            {
+                DepackHarness h;
+                h.Send(1, 1000, true, Bytes{ h264::kNalFuA });
+                h.Send(2, 2000, true, FuA(0x65, false, true, { 0x88 }));
+                h.Send(3, 3000, false, FuA(0x65, true, false, { 0x88 }));
+                h.Send(4, 3000, true, FuA(0x65, true, false, { 0x11 }));
+                h.Send(5, 4000, true, FuA(0x65, true, true, { 0x88 }));
+                t.Check(h.depack.GetCounters().fuaErrors >= 4, L"hostile h264: missing FU header, continuation, repeated start, start+end");
+            }
+            {
+                H264Depacketizer::Limits limits;
+                limits.maxFuFragments = 4;
+                DepackHarness h;
+                h.depack = H264Depacketizer([&h](AccessUnitPtr au) { h.units.push_back(std::move(au)); }, limits);
+                h.Send(1, 1000, false, FuA(0x65, true, false, { 0x80 }));
+                h.Send(2, 1000, false, FuA(0x65, false, false, { 0x01 }));
+                h.Send(3, 1000, false, FuA(0x65, false, false, { 0x02 }));
+                h.Send(4, 1000, false, FuA(0x65, false, false, { 0x03 }));
+                h.Send(5, 1000, true, FuA(0x65, false, true, { 0x04 }));
+                t.Check(h.Pattern() == L"I" && h.depack.GetCounters().oversize >= 1, L"hostile h264: FU-A fragment cap");
+            }
+            {
+                H264Depacketizer::Limits limits;
+                limits.maxAuBytes = 16;
+                DepackHarness h;
+                h.depack = H264Depacketizer([&h](AccessUnitPtr au) { h.units.push_back(std::move(au)); }, limits);
+                h.Send(1, 1000, true, Bytes(64, 0x65));
+                t.Check(h.Pattern() == L"I" && h.IncompleteCarryNoData(), L"hostile h264: access-unit byte cap");
+            }
+            {
+                DepackHarness h;
+                h.Send(1, 1000, true, Bytes{ 0x78, 0x00, 0x02 });
+                h.Send(2, 2000, true, Bytes{ 0x78, 0x00, 0x00, 0x67 });
+                h.Send(3, 3000, true, Bytes{ 0x78, 0x00, 0x04, 0x67, 0x42 });
+                std::vector<Bytes> many(40, Bytes{ 0x67, 0x42 });
+                h.Send(4, 4000, true, StapA(many));
+                t.Check(h.Pattern() == L"IIII" && h.depack.GetCounters().stapaErrors == 4,
+                        L"hostile h264: truncated, zero-length, overrun and excessive STAP-A");
+            }
+            {
+                DepackHarness h;
+                Bytes const sps = MakeSps(false, 120, 68, 4, false);
+                h.Send(1, 1000, true, kPSlice);
+                h.Send(2, 2000, true, StapA({ sps, kPps }));
+                H264KeyframeGate gate;
+                auto dropped = h.units.size() < 2 ? H264KeyframeGate::Decision::Submit : gate.Process(*h.units[1]).decision;
+                t.Check(h.units.size() >= 2 && h.units[1]->hasSps && !h.units[1]->hasSlice && !h.units[1]->corrupt &&
+                            dropped == H264KeyframeGate::Decision::DropNoSlice,
+                        L"hostile h264: SPS/PPS-only access unit is not submitted as a picture");
+                h.units.clear();
+                h.Send(2, 2000, true, kIdrSlice);
+                h.Send(3, 3000, false, kPSlice);
+                h.Send(5, 4000, true, kPSlice);
+                h.Send(6, 5000, false, sps);
+                h.Send(7, 5000, false, kPps);
+                h.Send(8, 5000, true, kIdrSlice);
+                t.Check(h.units.size() >= 2, L"hostile h264: corrupt input then a later access unit still completes");
+            }
+
+            SpsInfo info;
+            Bytes const baseline = MakeSps(false, 120, 68, 4, false);
+            bool truncations = true;
+            for (size_t n = 0; n < baseline.size(); n += 3)
+            {
+                truncations = truncations && !ParseSps(baseline.data(), n < 4 ? n : std::min(n, size_t{ 6 }), info);
+            }
+            t.Check(truncations && !ParseSps(baseline.data(), 3, info), L"hostile sps: truncated prefixes fail closed");
+
+            Bytes zeros(32, 0);
+            zeros[0] = 0x67;
+            t.Check(!ParseSps(zeros.data(), zeros.size(), info), L"hostile sps: pathological Exp-Golomb zeros fail closed");
+
+            Bytes hugeSps = MakeSps(false, 2000, 2000, 0, false);
+            t.Check(!ParseSps(hugeSps.data(), hugeSps.size(), info), L"hostile sps: dimensions above the safe range are rejected");
+
+            BitWriter crop;
+            crop.Bits(66, 8);
+            crop.Bits(0, 8);
+            crop.Bits(40, 8);
+            crop.Ue(0); // sps id
+            crop.Ue(0); // log2_max_frame_num_minus4
+            crop.Ue(0); // pic_order_cnt_type
+            crop.Ue(0); // log2_max_pic_order_cnt_lsb_minus4
+            crop.Ue(1); // max_num_ref_frames
+            crop.Bit(0);
+            crop.Ue(15);
+            crop.Ue(15);
+            crop.Bit(1);
+            crop.Bit(1);
+            crop.Bit(1);
+            crop.Ue(0xFFFFFFFEu);
+            crop.Ue(2);
+            crop.Ue(0);
+            crop.Ue(0);
+            crop.Bit(0);
+            Bytes cropNal{ 0x67 };
+            Bytes cropBody = AddEmulationPrevention(crop.Finish());
+            cropNal.insert(cropNal.end(), cropBody.begin(), cropBody.end());
+            t.Check(!ParseSps(cropNal.data(), cropNal.size(), info), L"hostile sps: overflowing crop offsets are rejected");
+
+            t.Check(ParseSps(baseline.data(), baseline.size(), info) && info.width == 1920 && info.height == 1080,
+                    L"hostile sps: a valid SPS still parses after malformed input");
+
+            {
+                auto stats = std::make_shared<ReceiverStats>();
+                auto pcm = std::make_shared<PcmRingBuffer>(64, 2);
+                ReceiverSettings settings;
+                AudioReceiver receiver(settings, stats, pcm);
+                auto const audioNow = Clock::now();
+                Bytes odd = MakeRtp(1, 0, 9, false, Bytes(6, 0x10));
+                Bytes zero = MakeRtp(2, 0, 9, false, {});
+                receiver.ProcessDatagram(odd.data(), odd.size(), audioNow);
+                receiver.ProcessDatagram(zero.data(), zero.size(), audioNow);
+                t.Check(!receiver.EverReceived() && pcm->Available() == 0, L"hostile audio: odd and empty payloads do not update activity");
+
+                Bytes aligned(2048 - 12, 0x10);
+                Bytes maxPacket = MakeRtp(10, 0, 9, false, aligned);
+                Bytes over = MakeRtp(11, 1000, 9, false, Bytes(2048, 0x10));
+                receiver.ProcessDatagram(maxPacket.data(), maxPacket.size(), audioNow);
+                auto const audioLater = audioNow + std::chrono::milliseconds(40);
+                receiver.ProcessDatagram(over.data(), over.size(), audioLater);
+                t.Check(receiver.EverReceived() && receiver.LastPacketTime() == audioNow && pcm->Available() > 0,
+                        L"hostile audio: maximum aligned payload is accepted and the next oversized packet is not");
+
+                Bytes wrapped = MakeRtp(11, 0x10u, 9, false, Bytes(8, 0x20));
+                receiver.ProcessDatagram(wrapped.data(), wrapped.size(), audioLater);
+                t.Check(receiver.LastPacketTime() == audioLater, L"hostile audio: a later valid packet is accepted after junk");
+            }
+
+            {
+                PcmRingBuffer ring(4, 2);
+                float in[16] = { 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8 };
+                float out[8] = {};
+                t.Check(ring.Write(in, 6) == 4 && ring.Read(out, 4) == 4 && ring.Available() == 0 && ring.Write(in, 2) == 2,
+                        L"hostile audio: ring full and empty transitions stay inside capacity");
+            }
+
+            auto stats = std::make_shared<ReceiverStats>();
+            stats->Set(Stat::VideoInvalid, INT64_MAX - 2);
+            stats->Add(Stat::VideoInvalid, 10);
+            t.Check(stats->Get(Stat::VideoInvalid) == INT64_MAX, L"hostile stats: counters saturate instead of wrapping");
+
+            uint32_t seed = 0xC0FFEEu;
+            auto next = [&]()
+            {
+                seed = seed * 1664525u + 1013904223u;
+                return seed;
+            };
+            bool survived = true;
+            for (int i = 0; i < 400; ++i)
+            {
+                size_t const n = next() % 48;
+                Bytes blob(n);
+                for (size_t b = 0; b < n; ++b)
+                {
+                    blob[b] = static_cast<uint8_t>(next());
+                }
+                RtpPacketView parsed;
+                ParseRtpPacket(blob.empty() ? nullptr : blob.data(), blob.size(), parsed);
+                SpsInfo sps;
+                if (!blob.empty())
+                {
+                    ParseSps(blob.data(), blob.size(), sps);
+                }
+                DepackHarness h;
+                h.Send(static_cast<int64_t>(i + 1), static_cast<int64_t>(next()), (next() & 1) != 0, blob);
+                survived = survived && h.units.size() <= 1;
+                if (!survived)
+                {
+                    Log(L"SELFTEST FAIL: hostile stress seed=0x%X iteration=%d", 0xC0FFEEu, i);
+                    break;
+                }
+            }
+            t.Check(survived, L"hostile stress: seeded mutated buffers stay bounded");
+        }
     }
 
     SelfTestResult RunSelfTests()
@@ -2351,6 +2611,7 @@ namespace rx
         TestAudioStage(t);
         TestLifecycle(t);
         TestReceiverSettings(t);
+        TestHostileInput(t);
 
         SelfTestResult result;
         result.passed = t.passed;

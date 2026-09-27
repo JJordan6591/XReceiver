@@ -27,8 +27,9 @@
         <Style x:Key="PanelButton" TargetType="Button">
             <Setter Property="Margin" Value="0,0,12,0" />
             <Setter Property="MinWidth" Value="120" />
-            <Setter Property="MinHeight" Value="40" />
-            <Setter Property="FontSize" Value="16" />
+            <Setter Property="MinHeight" Value="48" />
+            <Setter Property="FontSize" Value="18" />
+            <Setter Property="Padding" Value="16,8" />
             <Setter Property="UseSystemFocusVisuals" Value="True" />
         </Style>
         <Style x:Key="PrimaryPanelButton" TargetType="Button" BasedOn="{StaticResource PanelButton}">
@@ -91,6 +92,8 @@
                         <TextBlock x:Name="StatusText" Text="Stopped" Style="{StaticResource StatusPrimaryText}" />
                     </StackPanel>
                     <TextBlock x:Name="StatusDetailText" Style="{StaticResource StatusSecondaryText}" Margin="22,4,0,0" Visibility="Collapsed" />
+                    <TextBlock x:Name="WaitingGuide" Style="{StaticResource StatusSecondaryText}" Margin="22,8,0,0" Visibility="Collapsed"
+                               Text="The sender and this Xbox must be on the same local network." />
                 </StackPanel>
             </Border>
 
@@ -123,17 +126,15 @@
                         MaxHeight="720">
                     <ScrollViewer VerticalScrollBarVisibility="Auto">
                         <StackPanel>
-                            <TextBlock Text="Welcome" Style="{StaticResource SectionTitleText}" />
-                            <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,14"
-                                       Text="This Xbox app receives video and audio from a companion server on your local network. It does not stream from the internet and does not require a cloud account." />
-                            <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,14"
-                                       Text="You need a separate compatible server on the same Wi‑Fi or Ethernet network. UxPlay is the companion server currently supported by this app. UxPlay is an independent open-source project and is not included with this app." />
-                            <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,14"
-                                       Text="This app does not implement AirPlay. It listens for the video and audio streams that a companion server sends." />
-                            <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,14"
-                                       Text="Default ports: video UDP 5000, audio UDP 5002. Start this receiver on the Xbox before you connect from the companion server." />
-                            <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,20"
-                                       Text="Video must be H.264. If playback fails, check that the companion server is not sending HEVC (H.265)." />
+                            <TextBlock x:Name="FirstRunTitle" Text="UwpSmokeTestCpp" Style="{StaticResource SectionTitleText}" />
+                            <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,10"
+                                       Text="Put this Xbox and the UxPlay computer on the same local network. Video is UDP 5000. Audio is UDP 5002." />
+                            <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,10"
+                                       Text="On the Apple device, choose this receiver from Screen Mirroring. UxPlay is a separate project and is not included here." />
+                            <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,10"
+                                       Text="Menu opens controls. View toggles diagnostics. B hides panels and never stops playback." />
+                            <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,16"
+                                       Text="Choose Video only in Playback overlay for an unobstructed picture. This app receives H.264, up to 1080p60, even on a 4K display." />
                             <Button x:Name="FirstRunContinueButton"
                                     Content="Continue"
                                     Style="{StaticResource PrimaryPanelButton}"
@@ -191,6 +192,20 @@
                                       automation:AutomationProperties.Name="Auto-start"
                                       automation:AutomationProperties.HelpText="Starts the receiver automatically when the app launches." />
                     </StackPanel>
+
+                    <TextBlock Text="Playback overlay" Style="{StaticResource LabelText}" Margin="0,0,0,8" />
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                        <Button x:Name="OverlayAutomaticButton" Content="Automatic" Style="{StaticResource PanelButton}" Click="OnOverlayAutomaticClick"
+                                automation:AutomationProperties.Name="Automatic overlay"
+                                automation:AutomationProperties.HelpText="Shows status briefly, then hides it during playback." />
+                        <Button x:Name="OverlayAlwaysButton" Content="Always visible" Style="{StaticResource PanelButton}" Click="OnOverlayAlwaysClick"
+                                automation:AutomationProperties.Name="Always visible overlay"
+                                automation:AutomationProperties.HelpText="Keeps the compact status visible while receiving." />
+                        <Button x:Name="OverlayVideoOnlyButton" Content="Video only" Style="{StaticResource PanelButton}" Click="OnOverlayVideoOnlyClick"
+                                automation:AutomationProperties.Name="Video only overlay"
+                                automation:AutomationProperties.HelpText="Hides all chrome while healthy video is playing. Menu and View can open panels temporarily." />
+                    </StackPanel>
+                    <TextBlock x:Name="OverlayModeText" Style="{StaticResource HelperText}" Margin="0,0,0,12" Text="Automatic" />
 
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
                         <TextBlock Text="A/V offset" Style="{StaticResource LabelText}" />

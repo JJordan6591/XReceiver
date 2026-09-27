@@ -132,9 +132,11 @@ namespace
 
 namespace winrt::UwpSmokeTestCpp::implementation
 {
+    rx::ChromeState ToChromeState(ConnectionState state);
     void MainPage::OnNavigatedTo(NavigationEventArgs const&)
     {
         m_settings = rx::ReceiverSettings::Load();
+        FirstRunTitle().Text(rx::AppDisplayName());
 
         m_player = MediaPlayer();
         rx::VideoPresenter::ConfigurePlayer(m_player, nullptr);
@@ -235,8 +237,11 @@ namespace winrt::UwpSmokeTestCpp::implementation
         AudioToggle().IsOn(m_settings.audioEnabled);
         TolerantToggle().IsOn(m_settings.lossPolicy == rx::LossPolicy::Tolerant);
         AutoStartToggle().IsOn(m_settings.autoStart);
-        AvOffsetText().Text(to_hstring(m_settings.avOffsetMs) + L" ms");
-        SetDiagnosticsVisible(m_settings.diagnosticsVisible);
+        wchar_t offset[64] = {};
+        rx::FormatAvOffset(m_settings.avOffsetMs, offset, 64);
+        AvOffsetText().Text(offset);
+        OverlayModeText().Text(rx::OverlayLabel(m_settings.playbackOverlay));
+        m_liveDiagnostics = m_settings.diagnosticsVisible && m_settings.playbackOverlay != rx::PlaybackOverlay::VideoOnly;
         m_loadingUi = false;
     }
 
@@ -389,7 +394,9 @@ namespace winrt::UwpSmokeTestCpp::implementation
     void MainPage::OnAvMinusClick(IInspectable const&, RoutedEventArgs const&)
     {
         m_settings.avOffsetMs = std::max(-500, m_settings.avOffsetMs - 10);
-        AvOffsetText().Text(to_hstring(m_settings.avOffsetMs) + L" ms");
+        wchar_t offset[64] = {};
+        rx::FormatAvOffset(m_settings.avOffsetMs, offset, 64);
+        AvOffsetText().Text(offset);
         m_settings.Save();
         if (m_session)
         {
@@ -400,7 +407,9 @@ namespace winrt::UwpSmokeTestCpp::implementation
     void MainPage::OnAvPlusClick(IInspectable const&, RoutedEventArgs const&)
     {
         m_settings.avOffsetMs = std::min(500, m_settings.avOffsetMs + 10);
-        AvOffsetText().Text(to_hstring(m_settings.avOffsetMs) + L" ms");
+        wchar_t offset[64] = {};
+        rx::FormatAvOffset(m_settings.avOffsetMs, offset, 64);
+        AvOffsetText().Text(offset);
         m_settings.Save();
         if (m_session)
         {
@@ -611,10 +620,8 @@ namespace winrt::UwpSmokeTestCpp::implementation
     {
         // Single-page app: B only hides the panel and must never navigate or exit.
         m_lastInput = rx::Clock::now();
-        if (PanelVisible())
-        {
-            ShowPanel(false);
-        }
+        ShowPanel(false);
+        SetDiagnosticsVisible(false);
         args.Handled(true);
     }
 
@@ -658,16 +665,18 @@ namespace winrt::UwpSmokeTestCpp::implementation
                 StartButton().Focus(FocusState::Programmatic);
             }
         }
+        ApplyChrome(m_lastState, false);
     }
 
     void MainPage::SetDiagnosticsVisible(bool visible)
     {
-        DiagnosticsPanel().Visibility(visible ? Visibility::Visible : Visibility::Collapsed);
+        m_liveDiagnostics = visible;
         if (m_settings.diagnosticsVisible != visible)
         {
             m_settings.diagnosticsVisible = visible;
             m_settings.Save();
         }
+        ApplyChrome(m_lastState, false);
     }
 
     void MainPage::UpdateControls()
@@ -724,41 +733,25 @@ namespace winrt::UwpSmokeTestCpp::implementation
 
     void MainPage::UpdateStatus(ConnectionState state, rx::ReceiverStats::Snapshot const& snapshot)
     {
-        StatusText().Text(StatusTitle(state));
+        bool const waitingKeyframe = m_session && rx::At(snapshot, Stat::WaitingForKeyframe) != 0;
+        bool const audioFailed = m_session && !m_session->AudioStatus().empty() && m_settings.audioEnabled;
+        rx::StatusCopy const copy = rx::StatusFor(ToChromeState(state), waitingKeyframe, m_settings.audioEnabled, audioFailed);
+        StatusText().Text(copy.title);
         StatusDot().Fill(SolidColorBrush(StateColor(state)));
 
-        std::wstring detail;
-        switch (state)
+        std::wstring detail = copy.detail;
+        if (state == ConnectionState::Waiting)
         {
-        case ConnectionState::Stopped:
-            detail = L"Press Start to listen for video and audio on your local network.";
-            break;
-        case ConnectionState::Starting:
-            detail = L"Opening listeners and preparing playback.";
-            break;
-        case ConnectionState::Waiting:
-            Append(detail, L"Start your companion server on the same network, then connect from that device. Listening on UDP %d (video)", m_settings.videoPort);
+            Append(detail, L" Listening on UDP %d", m_settings.videoPort);
             if (m_settings.audioEnabled)
             {
-                Append(detail, L" and %d (audio)", m_settings.audioPort);
+                Append(detail, L" and %d", m_settings.audioPort);
             }
             detail += L".";
-            break;
-        case ConnectionState::Receiving:
-            Append(detail, L"%lld×%lld at %.1f fps (%.1f Mbps).", rx::At(snapshot, Stat::Width), rx::At(snapshot, Stat::Height), m_fps, m_videoMbps);
-            if (rx::At(snapshot, Stat::WaitingForKeyframe))
-            {
-                detail += L" Showing the last good picture until video resumes.";
-            }
-            break;
-        case ConnectionState::Reconnecting:
-            detail = L"No new video or audio has arrived for a while. Waiting for media to resume.";
-            break;
-        case ConnectionState::Error:
-            detail = L"Check the companion server and network, then press Stop and Start to try again.";
-            break;
-        default:
-            break;
+        }
+        else if (state == ConnectionState::Receiving && !waitingKeyframe)
+        {
+            Append(detail, L" %lld×%lld.", rx::At(snapshot, Stat::Width), rx::At(snapshot, Stat::Height));
         }
 
         if (m_session)
@@ -792,6 +785,80 @@ namespace winrt::UwpSmokeTestCpp::implementation
 
         StatusDetailText().Text(detail);
         StatusDetailText().Visibility(detail.empty() ? Visibility::Collapsed : Visibility::Visible);
+        ApplyChrome(state, waitingKeyframe);
+    }
+
+    rx::ChromeState ToChromeState(ConnectionState state)
+    {
+        switch (state)
+        {
+        case ConnectionState::Starting: return rx::ChromeState::Starting;
+        case ConnectionState::Waiting: return rx::ChromeState::Waiting;
+        case ConnectionState::Receiving: return rx::ChromeState::Receiving;
+        case ConnectionState::Reconnecting: return rx::ChromeState::Reconnecting;
+        case ConnectionState::Error: return rx::ChromeState::Error;
+        default: return rx::ChromeState::Stopped;
+        }
+    }
+
+    void MainPage::SetOverlay(rx::PlaybackOverlay overlay)
+    {
+        if (m_loadingUi)
+        {
+            return;
+        }
+        m_settings.playbackOverlay = overlay;
+        m_settings.Save();
+        OverlayModeText().Text(rx::OverlayLabel(overlay));
+        if (overlay == rx::PlaybackOverlay::VideoOnly)
+        {
+            m_liveDiagnostics = false;
+        }
+        m_statusHoldUntil = rx::Clock::now() + std::chrono::seconds(5);
+        ApplyChrome(m_lastState, false);
+    }
+
+    void MainPage::OnOverlayAutomaticClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        SetOverlay(rx::PlaybackOverlay::Automatic);
+    }
+
+    void MainPage::OnOverlayAlwaysClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        SetOverlay(rx::PlaybackOverlay::AlwaysVisible);
+    }
+
+    void MainPage::OnOverlayVideoOnlyClick(IInspectable const&, RoutedEventArgs const&)
+    {
+        SetOverlay(rx::PlaybackOverlay::VideoOnly);
+    }
+
+    void MainPage::ApplyChrome(ConnectionState state, bool waitingForKeyframe)
+    {
+        if (state != m_chromeState)
+        {
+            m_chromeState = state;
+            m_statusHoldUntil = rx::Clock::now() + std::chrono::seconds(5);
+        }
+        rx::ChromeInput input;
+        input.overlay = m_settings.playbackOverlay;
+        input.state = ToChromeState(state);
+        input.usableVideo = state == ConnectionState::Receiving && !waitingForKeyframe;
+        input.waitingForKeyframe = waitingForKeyframe;
+        input.panelOpen = PanelVisible();
+        input.diagnosticsOpen = m_liveDiagnostics;
+        input.statusHold = rx::Clock::now() < m_statusHoldUntil;
+        input.firstRun = FirstRunVisible();
+        rx::ChromeVisibility const visible = rx::DecideChrome(input);
+        StatusPill().Visibility(visible.status ? Visibility::Visible : Visibility::Collapsed);
+        WaitingGuide().Visibility(visible.waitingGuide ? Visibility::Visible : Visibility::Collapsed);
+        ControlPanel().Visibility(visible.controls ? Visibility::Visible : Visibility::Collapsed);
+        DiagnosticsPanel().Visibility(visible.diagnostics ? Visibility::Visible : Visibility::Collapsed);
+        if (m_controlsWereVisible && !visible.controls && !visible.diagnostics && !input.firstRun)
+        {
+            this->Focus(FocusState::Programmatic);
+        }
+        m_controlsWereVisible = visible.controls;
     }
 
     void MainPage::UpdateDiagnostics(rx::ReceiverStats::Snapshot const& s)

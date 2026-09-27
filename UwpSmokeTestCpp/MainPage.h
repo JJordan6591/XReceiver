@@ -37,6 +37,9 @@ namespace winrt::UwpSmokeTestCpp::implementation
         void OnDiagnosticsClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
         void OnHelpClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
         void OnFirstRunContinueClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
+        void OnOverlayAutomaticClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
+        void OnOverlayAlwaysClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
+        void OnOverlayVideoOnlyClick(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
         void OnPortLostFocus(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
         void OnAudioToggled(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
         void OnTolerantToggled(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::RoutedEventArgs const& args);
@@ -69,6 +72,8 @@ namespace winrt::UwpSmokeTestCpp::implementation
         void UpdateDisplayRequest(rx::ConnectionState state);
         void UpdateControls();
         void UpdateAutoHide(rx::ConnectionState state);
+        void ApplyChrome(rx::ConnectionState state, bool waitingForKeyframe);
+        void SetOverlay(rx::PlaybackOverlay overlay);
         void ShowPanel(bool show);
         void SetDiagnosticsVisible(bool visible);
         void ShowFirstRun(bool show);
@@ -97,6 +102,10 @@ namespace winrt::UwpSmokeTestCpp::implementation
         rx::ConnectionState m_lastState = rx::ConnectionState::Stopped;
         rx::Clock::time_point m_lastInput{};
         rx::Clock::time_point m_receivingSince{};
+        rx::Clock::time_point m_statusHoldUntil{};
+        rx::ConnectionState m_chromeState = rx::ConnectionState::Stopped;
+        bool m_liveDiagnostics = false;
+        bool m_controlsWereVisible = true;
 
 #ifdef _DEBUG
         std::shared_ptr<rx::PocSocketCounter> m_pocSockets;

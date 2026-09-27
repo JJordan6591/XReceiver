@@ -27,6 +27,7 @@
 #include "VideoTimeline.h"
 #include "ReceiverSettings.h"
 #include "Health.h"
+#include "UiChrome.h"
 
 using namespace winrt;
 using namespace winrt::Windows::Foundation;
@@ -2765,6 +2766,97 @@ namespace rx
             t.Check(simulated.UptimeMs(cursor) == 2000000 && simulated.Flags() == HealthOk, L"health: injected long session stays healthy");
             t.Check(sizeof(RollingSampleWindow<128>) < 4096, L"health window: fixed memory");
         }
+
+        void TestUiChrome(TestContext& t)
+        {
+            t.Check(SanitizeOverlay(0) == PlaybackOverlay::Automatic && SanitizeOverlay(1) == PlaybackOverlay::AlwaysVisible &&
+                        SanitizeOverlay(2) == PlaybackOverlay::VideoOnly && SanitizeOverlay(99) == PlaybackOverlay::Automatic,
+                    L"ui overlay: invalid values fall back to Automatic");
+            t.Check(std::wcscmp(AppDisplayName(), L"UwpSmokeTestCpp") == 0, L"ui title is centralized");
+
+            ChromeInput healthy;
+            healthy.overlay = PlaybackOverlay::VideoOnly;
+            healthy.state = ChromeState::Receiving;
+            healthy.usableVideo = true;
+            ChromeVisibility clean = DecideChrome(healthy);
+            t.Check(clean.videoClean && !clean.status && !clean.controls && !clean.diagnostics && !clean.waitingGuide,
+                    L"ui video only: healthy playback is unobstructed");
+
+            ChromeInput menu = ApplyChromeAction(healthy, ChromeAction::Menu);
+            ChromeVisibility withPanel = DecideChrome(menu);
+            t.Check(withPanel.controls && !withPanel.status && !withPanel.videoClean, L"ui video only: Menu opens the panel only");
+            ChromeInput closed = ApplyChromeAction(menu, ChromeAction::Back);
+            ChromeVisibility afterBack = DecideChrome(closed);
+            t.Check(afterBack.videoClean && !afterBack.controls && !afterBack.diagnostics, L"ui video only: B returns to clean playback");
+            t.Check(closed.state == ChromeState::Receiving && closed.usableVideo, L"ui video only: B does not change media state");
+
+            ChromeInput view = ApplyChromeAction(healthy, ChromeAction::View);
+            t.Check(DecideChrome(view).diagnostics && !DecideChrome(view).status, L"ui video only: View shows diagnostics only");
+
+            ChromeInput reconnect = healthy;
+            reconnect.state = ChromeState::Reconnecting;
+            reconnect.usableVideo = false;
+            t.Check(DecideChrome(reconnect).status && !DecideChrome(reconnect).videoClean, L"ui video only: reconnecting restores status");
+
+            ChromeInput automatic = healthy;
+            automatic.overlay = PlaybackOverlay::Automatic;
+            automatic.statusHold = true;
+            t.Check(DecideChrome(automatic).status, L"ui automatic: status holds after a change");
+            automatic.statusHold = false;
+            t.Check(!DecideChrome(automatic).status, L"ui automatic: status hides during steady playback");
+
+            ChromeInput always = healthy;
+            always.overlay = PlaybackOverlay::AlwaysVisible;
+            always.statusHold = false;
+            t.Check(DecideChrome(always).status && !DecideChrome(always).controls, L"ui always visible: status stays and controls can hide");
+
+            ChromeInput waiting;
+            waiting.state = ChromeState::Waiting;
+            waiting.overlay = PlaybackOverlay::Automatic;
+            t.Check(DecideChrome(waiting).status && DecideChrome(waiting).waitingGuide, L"ui waiting: guide is shown");
+
+            StatusCopy key = StatusFor(ChromeState::Receiving, true, true, false);
+            StatusCopy stopped = StatusFor(ChromeState::Stopped, false, true, false);
+            t.Check(std::wcscmp(key.title, L"Waiting for video keyframe") == 0 && std::wcscmp(stopped.title, L"Receiver stopped") == 0,
+                    L"ui status: keyframe and stopped copy");
+
+            wchar_t offset[64] = {};
+            FormatAvOffset(100, offset, 64);
+            t.Check(std::wcscmp(offset, L"+100 ms, audio later") == 0, L"ui offset: positive means audio later");
+            FormatAvOffset(-40, offset, 64);
+            t.Check(std::wcscmp(offset, L"-40 ms, audio earlier") == 0, L"ui offset: negative means audio earlier");
+
+            wchar_t missing[16] = {};
+            FormatUnavailable(false, 0, L" KB", missing, 16);
+            t.Check(std::wcscmp(missing, L"\u2014") == 0, L"ui metrics: unavailable is an em dash");
+
+            FocusTarget hidden = FocusForChrome(healthy, clean, true);
+            t.Check(hidden == FocusTarget::None, L"ui focus: hidden chrome keeps no control focus");
+            ChromeInput panel = healthy;
+            panel.panelOpen = true;
+            t.Check(FocusForChrome(panel, DecideChrome(panel), true) == FocusTarget::Stop, L"ui focus: open panel focuses Stop while receiving");
+
+            ControlAvailability controls = ControlsFor(true, false);
+            t.Check(!controls.ports && controls.stop && controls.overlay && controls.avOffset, L"ui controls: ports lock while receiving, overlay stays available");
+            t.Check(!ShowDeveloperControls(false) && ShowDeveloperControls(true), L"ui: developer controls follow the build");
+
+            IPropertySet legacy = MakeSettingsMap();
+            legacy.Insert(L"settingsVersion", box_value(2));
+            legacy.Insert(L"avOffsetMs", box_value(100));
+            legacy.Insert(L"firstRunDismissed", box_value(true));
+            ReceiverSettings::MigrateStoredSettings(legacy);
+            ReceiverSettings migrated = ReceiverSettings::LoadFromValues(legacy);
+            migrated.Sanitize();
+            t.Check(migrated.playbackOverlay == PlaybackOverlay::Automatic && migrated.avOffsetMs == 100 && migrated.firstRunDismissed &&
+                        unbox_value_or<int32_t>(legacy.TryLookup(L"settingsVersion"), 0) == ReceiverSettings::kCurrentSettingsVersion,
+                    L"ui settings: existing users migrate to Automatic without onboarding");
+
+            ReceiverSettings junk;
+            junk.playbackOverlay = static_cast<PlaybackOverlay>(40);
+            junk.avOffsetMs = 100;
+            junk.Sanitize();
+            t.Check(junk.playbackOverlay == PlaybackOverlay::Automatic && junk.avOffsetMs == 100, L"ui settings: invalid overlay falls back and keeps the offset");
+        }
     }
 
     SelfTestResult RunSelfTests()
@@ -2795,6 +2887,7 @@ namespace rx
         TestReceiverSettings(t);
         TestHostileInput(t);
         TestHealth(t);
+        TestUiChrome(t);
 
         SelfTestResult result;
         result.passed = t.passed;

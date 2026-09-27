@@ -70,6 +70,7 @@ namespace rx
                      L"idleTimeoutMs",
                      L"ssrcTakeoverMs",
                      L"firstRunDismissed",
+                     L"playbackOverlay",
                  })
             {
                 if (values.HasKey(key))
@@ -102,6 +103,10 @@ namespace rx
             {
                 values.Insert(L"diagnosticsVisible", box_value(true));
             }
+            if (storedVersion < 3 && !values.HasKey(L"playbackOverlay"))
+            {
+                values.Insert(L"playbackOverlay", box_value(static_cast<int32_t>(PlaybackOverlay::Automatic)));
+            }
             if (values.HasKey(L"settingsVersion"))
             {
                 values.Remove(L"settingsVersion");
@@ -125,6 +130,7 @@ namespace rx
         s.autoStart = ReadBool(values, L"autoStart", s.autoStart);
         s.diagnosticsVisible = ReadBool(values, L"diagnosticsVisible", diagnosticsFallback);
         s.firstRunDismissed = ReadBool(values, L"firstRunDismissed", s.firstRunDismissed);
+        s.playbackOverlay = SanitizeOverlay(ReadInt(values, L"playbackOverlay", static_cast<int32_t>(s.playbackOverlay)));
         s.videoReorderTimeoutMs = ReadInt(values, L"videoReorderTimeoutMs", s.videoReorderTimeoutMs);
         s.videoReorderWindow = ReadInt(values, L"videoReorderWindow", s.videoReorderWindow);
         s.audioReorderTimeoutMs = ReadInt(values, L"audioReorderTimeoutMs", s.audioReorderTimeoutMs);
@@ -174,6 +180,7 @@ namespace rx
         values.Insert(L"autoStart", box_value(autoStart));
         values.Insert(L"diagnosticsVisible", box_value(diagnosticsVisible));
         values.Insert(L"firstRunDismissed", box_value(firstRunDismissed));
+        values.Insert(L"playbackOverlay", box_value(static_cast<int32_t>(playbackOverlay)));
         values.Insert(L"videoReorderTimeoutMs", box_value(videoReorderTimeoutMs));
         values.Insert(L"videoReorderWindow", box_value(videoReorderWindow));
         values.Insert(L"audioReorderTimeoutMs", box_value(audioReorderTimeoutMs));
@@ -234,6 +241,7 @@ namespace rx
         audioMaxDelayMs = std::clamp(audioMaxDelayMs, audioMinDelayMs, 1000);
         videoPipelineLatencyMs = std::clamp(videoPipelineLatencyMs, 0, 1000);
         avOffsetMs = std::clamp(avOffsetMs, -500, 500);
+        playbackOverlay = SanitizeOverlay(static_cast<int32_t>(playbackOverlay));
         idleTimeoutMs = std::clamp(idleTimeoutMs, kMinIdleTimeoutMs, 60000);
         ssrcTakeoverMs = std::clamp(ssrcTakeoverMs, 100, 60000);
     }

@@ -498,3 +498,34 @@ VPS/SPS/PPS handling, HEVC keyframe and corruption recovery, Xbox HEVC
 capability detection, an HEVC MediaStreamSource, hostile-input tests,
 UxPlay rtph265pay forwarding, and a performance pass whose first target
 would be 4K30. None of that is in this build.
+
+
+------------------------------------------------------------------------
+14. Xbox UI check (about 15-20 minutes)
+------------------------------------------------------------------------
+Not run as part of this change. Use a controller. A 4K display check is
+layout only; the stream is still H.264 up to 1080p60.
+
+  [ ] Clear app data and launch at 720p. Onboarding fits the TV-safe area.
+  [ ] Continue, restart, and confirm onboarding does not return.
+  [ ] Reopen Help.
+  [ ] Reach every control with the controller. Focus order and the focus
+      ring are obvious.
+  [ ] Start and stop.
+  [ ] Mirror. Automatic hides the status after a few seconds.
+  [ ] Always visible keeps the compact status.
+  [ ] Video only shows no chrome during healthy playback.
+  [ ] Menu opens the panel. B returns to unobstructed video and does not
+      stop playback.
+  [ ] View shows diagnostics. B hides them.
+  [ ] Waiting, Receiving, and Reconnecting each have their own wording.
+  [ ] A static picture with audio stays Receiving.
+  [ ] Saved offset is still +100 ms.
+  [ ] Repeat the layout look at 1080p, and at 4K output if the console
+      is set that way.
+  [ ] Release has no Self-test or PoC controls.
+  [ ] Video, audio, latency, and recovery behave as before.
+
+  Pass / fail:
+  Notes:
+  Screenshots:

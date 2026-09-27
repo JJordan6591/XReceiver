@@ -148,6 +148,7 @@
     <ClInclude Include="RtpSequence.h" />
     <ClInclude Include="SelfTest.h" />
     <ClInclude Include="SincResampler.h" />
+    <ClInclude Include="UiChrome.h" />
     <ClInclude Include="VideoPresenter.h" />
     <ClInclude Include="VideoReceiver.h" />
     <ClInclude Include="VideoTimeline.h" />

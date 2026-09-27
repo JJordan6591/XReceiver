@@ -36,3 +36,6 @@ XReceiver is an Xbox Developer Mode app. It receives H.264 video (UDP 5000) and 
 ## Unreleased
 
 - A/V offset changes apply on the next audio quantum as a one-time gap (later) or skip (earlier), instead of drifting in over 20 to 40 seconds. A 10 ms step is no longer lost in the drift deadband
+- An audio packet that is not a whole number of L16 stereo frames is rejected before it can lock, take over or refresh the audio stream
+- Fragmented (FU-A) H.264 NALs now count toward the existing per-access-unit NAL cap, once per NAL
+- Audio recovers at once when the sender restarts its RTP audio timestamps by more than 200 ms without changing SSRC

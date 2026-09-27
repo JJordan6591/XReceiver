@@ -191,6 +191,7 @@ namespace rx
         {
         case RtpAdmission::Invalid:
         case RtpAdmission::TooShort:
+        case RtpAdmission::PartialUnit:
             m_stats->Add(Stat::VideoInvalid);
             return;
         case RtpAdmission::WrongPayloadType:

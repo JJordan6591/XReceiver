@@ -441,6 +441,10 @@ namespace rx
         {
         public:
             DepackHarness() : depack([this](AccessUnitPtr au) { units.push_back(std::move(au)); }) {}
+            explicit DepackHarness(H264Depacketizer::Limits limits) :
+                depack([this](AccessUnitPtr au) { units.push_back(std::move(au)); }, limits)
+            {
+            }
             DepackHarness(DepackHarness const&) = delete;
             DepackHarness& operator=(DepackHarness const&) = delete;
 
@@ -961,6 +965,87 @@ namespace rx
             h.Send(seq++, 10000, true, kPSlice);                     // P
             drain();
             return run;
+        }
+
+        void TestAccessUnitNalCap(TestContext& t)
+        {
+            H264Depacketizer::Limits limits;
+            limits.maxNals = 4;
+            Bytes const sps = MakeSps(false, 120, 68, 4, false);
+            Bytes const sei{ 0x06, 0x05, 0x01, 0x80 };
+            Bytes largeIdr{ 0x65, 0x88 };
+            largeIdr.insert(largeIdr.end(), 98, 0x11);
+
+            {
+                // Fifty fragments, one NAL: the fragment count is not a NAL count.
+                DepackHarness h(limits);
+                h.Send(1, 0, false, sps);
+                h.Send(2, 0, false, kPps);
+                h.SendFragmented(3, 0, largeIdr, 2);
+                t.Check(h.Pattern() == L"C" && h.units[0]->nals.size() == 3 && NalBytes(*h.units[0], 2) == largeIdr,
+                        L"nal cap: one fragmented NAL counts once however many fragments it has");
+            }
+            {
+                DepackHarness h(limits);
+                int64_t seq = 1;
+                for (int i = 0; i < 4; ++i)
+                {
+                    seq = h.SendFragmented(seq, 0, kIdrSliceLong, 2, {}, i == 3);
+                }
+                t.Check(h.Pattern() == L"C" && h.units[0]->nals.size() == 4 && h.depack.GetCounters().oversize == 0,
+                        L"nal cap: exactly the maximum of fragmented NALs is complete");
+            }
+            {
+                DepackHarness h(limits);
+                int64_t seq = 1;
+                for (int i = 0; i < 5; ++i)
+                {
+                    seq = h.SendFragmented(seq, 0, kIdrSliceLong, 2, {}, i == 4);
+                }
+                t.Check(h.Pattern() == L"I" && h.depack.GetCounters().oversize == 1 && h.IncompleteCarryNoData(),
+                        L"nal cap: one fragmented NAL beyond the maximum makes the AU incomplete");
+            }
+            {
+                DepackHarness atLimit(limits);
+                atLimit.Send(1, 0, false, sps);
+                atLimit.Send(2, 0, false, StapA({ kPps, sei }));
+                atLimit.SendFragmented(3, 0, kIdrSliceLong, 2);
+                DepackHarness beyond(limits);
+                beyond.Send(1, 0, false, sps);
+                beyond.Send(2, 0, false, StapA({ kPps, sei }));
+                int64_t const next = beyond.SendFragmented(3, 0, kIdrSliceLong, 2, {}, false);
+                beyond.SendFragmented(next, 0, kIdrSliceLong, 2);
+                t.Check(atLimit.Pattern() == L"C" && atLimit.units[0]->nals.size() == 4 && atLimit.units[0]->isIdr &&
+                            beyond.Pattern() == L"I" && beyond.depack.GetCounters().oversize == 1,
+                        L"nal cap: single, STAP-A and FU-A NALs share one per-AU count");
+            }
+            {
+                // A capped AU is ordinary corruption: Strict waits, a P is held back, the next IDR recovers.
+                DepackHarness h(limits);
+                H264KeyframeGate gate;
+                H264KeyframeGate::Config config;
+                config.policy = LossPolicy::Strict;
+                gate.Configure(config);
+                gate.Reset();
+                int64_t seq = 1;
+                h.Send(seq++, 0, false, sps);
+                h.Send(seq++, 0, false, kPps);
+                seq = h.SendFragmented(seq, 0, kIdrSliceLong, 2);
+                for (int i = 0; i < 5; ++i)
+                {
+                    seq = h.SendFragmented(seq, 3000, kPSliceLong, 2, {}, i == 4);
+                }
+                seq = h.SendFragmented(seq, 6000, kPSliceLong, 2);
+                h.Send(seq++, 9000, false, sps);
+                h.Send(seq++, 9000, false, kPps);
+                h.SendFragmented(seq, 9000, kIdrSliceLong, 2);
+                bool const shape = h.Pattern() == L"CICC";
+                bool const first = shape && gate.Process(*h.units[0]).decision == Decision::Submit;
+                bool const capped = shape && gate.Process(*h.units[1]).decision == Decision::DropIncomplete && gate.IsWaiting();
+                bool const held = shape && gate.Process(*h.units[2]).decision == Decision::DropAwaitingIdr;
+                bool const recovered = shape && gate.Process(*h.units[3]).decision == Decision::Submit && !gate.IsWaiting();
+                t.Check(shape && first && capped && held && recovered, L"nal cap: a capped AU recovers on the next valid IDR");
+            }
         }
 
         void TestVideoRecovery(TestContext& t)
@@ -2287,6 +2372,70 @@ namespace rx
             }
         }
 
+        void TestAudioPartialFrames(TestContext& t)
+        {
+            {
+                RtpStreamTracker tracker;
+                RtpAdmissionRules rules;
+                rules.minPayloadBytes = 4;
+                rules.payloadUnitBytes = 4;
+                auto const now = Clock::now();
+                RtpPacketView view;
+                auto admit = [&](uint16_t sequence, uint32_t ssrc, size_t bytes)
+                {
+                    Bytes const datagram = MakeRtp(sequence, sequence * 100u, ssrc, false, Bytes(bytes, 0x10));
+                    return AdmitRtpPacket(datagram.data(), datagram.size(), rules, tracker, now, view);
+                };
+                bool const firstRejected = admit(1, 0xA, 6) == RtpAdmission::PartialUnit && !tracker.Locked();
+                bool const validLocks = admit(2, 0xB, 8) == RtpAdmission::NewStream && tracker.Ssrc() == 0xB;
+                bool const noTakeover = admit(50, 0xC, 10) == RtpAdmission::PartialUnit && admit(51, 0xC, 10) == RtpAdmission::PartialUnit &&
+                                        admit(52, 0xC, 10) == RtpAdmission::PartialUnit && tracker.Ssrc() == 0xB;
+                t.Check(firstRejected && validLocks && noTakeover && admit(3, 0xB, 8) == RtpAdmission::Accept,
+                        L"admission: partial media units are rejected before the stream tracker");
+            }
+
+            auto stats = std::make_shared<ReceiverStats>();
+            auto pcm = std::make_shared<PcmRingBuffer>(44100, 2);
+            AudioReceiver receiver(ReceiverSettings{}, stats, pcm);
+            auto feed = [&](uint16_t sequence, uint32_t timestamp, uint32_t ssrc, size_t bytes, Clock::time_point when)
+            {
+                Bytes const datagram = MakeRtp(sequence, timestamp, ssrc, false, Bytes(bytes, 0x10));
+                receiver.ProcessDatagram(datagram.data(), datagram.size(), when);
+            };
+            auto const t0 = Clock::now();
+
+            feed(1, 0, 0x71, 1602, t0);   // 400.5 stereo frames
+            t.Check(!receiver.EverReceived() && pcm->Available() == 0 && stats->Get(Stat::AudioPartialFrames) == 1 &&
+                        stats->Get(Stat::AudioInvalid) == 1 && stats->Get(Stat::AudioAccepted) == 0,
+                    L"audio partial frames: a malformed first packet is rejected and counted");
+
+            // A valid sender with another SSRC locks at once, so the malformed packet owned nothing.
+            feed(10, 0, 0x72, 1600, t0);
+            t.Check(receiver.EverReceived() && receiver.LastPacketTime() == t0 && pcm->Available() == 400 &&
+                        stats->Get(Stat::AudioSsrc) == 0x72 && stats->Get(Stat::AudioForeignSsrc) == 0 &&
+                        stats->Get(Stat::AudioStreamRestarts) == 0,
+                    L"audio partial frames: a malformed first packet does not lock the stream");
+
+            // Consecutive malformed packets from another SSRC, even after the takeover silence, are ignored.
+            auto const t1 = t0 + std::chrono::seconds(2);
+            feed(500, 0, 0x73, 1602, t1);
+            feed(501, 400, 0x73, 1602, t1);
+            feed(502, 800, 0x73, 1602, t1);
+            t.Check(receiver.LastPacketTime() == t0 && stats->Get(Stat::AudioSsrc) == 0x72 && stats->Get(Stat::AudioStreamRestarts) == 0 &&
+                        stats->Get(Stat::AudioForeignSsrc) == 0 && pcm->Available() == 400,
+                    L"audio partial frames: malformed packets cannot take over or refresh activity");
+
+            // A malformed packet on the locked stream does not take the sequence slot of the valid one.
+            feed(11, 400, 0x72, 1602, t1);
+            feed(11, 400, 0x72, 1600, t1);
+            t.Check(receiver.LastPacketTime() == t1 && pcm->Available() == 800 && stats->Get(Stat::AudioDuplicate) == 0 &&
+                        stats->Get(Stat::AudioStreamRestarts) == 0,
+                    L"audio partial frames: the next valid packet is accepted normally");
+            t.Check(stats->Get(Stat::AudioPackets) == 7 && stats->Get(Stat::AudioAccepted) == 2 &&
+                        stats->Get(Stat::AudioPartialFrames) == 5 && stats->Get(Stat::AudioInvalid) == 5,
+                    L"audio partial frames: rejection counters match the malformed packets");
+        }
+
         // Largest deviation from an ideal sine when resampling 44.1 kHz to 48 kHz. Images and
         // aliases add to the error, so a small value also means good stopband rejection.
         double ResampleSineError(SincResampler const& resampler, double hz, uint32_t channels)
@@ -3223,6 +3372,7 @@ namespace rx
         TestVideoPipeline(t);
         TestSps(t);
         TestGate(t);
+        TestAccessUnitNalCap(t);
         TestVideoRecovery(t);
         TestVideoTimeline(t);
         TestFrameDelivery(t);
@@ -3234,6 +3384,7 @@ namespace rx
         TestAudio(t);
         TestAudioActivity(t);
         TestAudioTimestampReset(t);
+        TestAudioPartialFrames(t);
         TestResampler(t);
         TestAudioStage(t);
         TestManualAvOffset(t);

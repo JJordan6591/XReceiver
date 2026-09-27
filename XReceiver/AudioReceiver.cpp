@@ -35,6 +35,7 @@ namespace rx
             rules.payloadType = s.audioPayloadType;
             rules.maxPacketBytes = kMaxPacketBytes;
             rules.minPayloadBytes = kL16BytesPerFrame;
+            rules.payloadUnitBytes = kL16BytesPerFrame;
             rules.takeoverAfterSilence = FromMs(s.ssrcTakeoverMs);
             return rules;
         }
@@ -160,6 +161,11 @@ namespace rx
         case RtpAdmission::TooShort:
             m_stats->Add(Stat::AudioInvalid);
             return;
+        case RtpAdmission::PartialUnit:
+            // A partial sample frame is not playable, and must not lock or take over the stream.
+            m_stats->Add(Stat::AudioPartialFrames);
+            m_stats->Add(Stat::AudioInvalid);
+            return;
         case RtpAdmission::WrongPayloadType:
             m_stats->Add(Stat::AudioWrongPayloadType);
             return;
@@ -171,14 +177,6 @@ namespace rx
             break;
         case RtpAdmission::Accept:
             break;
-        }
-
-        // A partial sample frame is not playable. Reject it before it counts as sender activity.
-        if (packet.payloadSize % kL16BytesPerFrame != 0)
-        {
-            m_stats->Add(Stat::AudioPartialFrames);
-            m_stats->Add(Stat::AudioInvalid);
-            return;
         }
 
         // Rejected datagrams must not keep the session in Receiving or reset the idle timer.

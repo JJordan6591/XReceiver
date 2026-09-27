@@ -180,6 +180,7 @@ namespace rx
         WrongPayloadType,
         TooLarge,           // beyond the receive buffer limit
         TooShort,           // payload smaller than one media unit
+        PartialUnit,        // payload not a whole number of media units
         Ignored,            // another sender, or an unconfirmed restart
     };
 
@@ -188,6 +189,7 @@ namespace rx
         int32_t payloadType = 96;
         size_t maxPacketBytes = 2048;
         size_t minPayloadBytes = 1;
+        size_t payloadUnitBytes = 1;     // e.g. one L16 stereo frame
         Clock::duration takeoverAfterSilence = std::chrono::seconds(1);
     };
 
@@ -212,6 +214,10 @@ namespace rx
         if (packet.payloadSize < rules.minPayloadBytes)
         {
             return RtpAdmission::TooShort;
+        }
+        if (rules.payloadUnitBytes > 1 && packet.payloadSize % rules.payloadUnitBytes != 0)
+        {
+            return RtpAdmission::PartialUnit;
         }
         switch (tracker.Check(packet, now, rules.takeoverAfterSilence))
         {

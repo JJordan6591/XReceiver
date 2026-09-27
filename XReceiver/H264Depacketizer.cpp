@@ -414,6 +414,12 @@ namespace rx
                 // The previous fragmented NAL never received its end fragment.
                 reject(m_counters.fuaErrors);
             }
+            if (m_au->nals.size() >= m_limits.maxNals)
+            {
+                // A fragmented NAL counts once toward the per-AU cap, like a single or STAP-A NAL.
+                reject(m_counters.oversize);
+                return;
+            }
             m_fuFragments = 1;
             uint8_t const header = static_cast<uint8_t>(nri | nalType);
             if (IsSliceType(nalType))

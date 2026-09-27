@@ -61,17 +61,27 @@ if exist "%GEN%" echo /I"%GEN%">>cl.rsp
 >> cl.rsp echo "%SRC%\MediaClock.cpp"
 >> cl.rsp echo "%SRC%\AudioReceiver.cpp"
 >> cl.rsp echo "%SRC%\ReceiverSettings.cpp"
->> cl.rsp echo /Fe:selftest.exe
+rem Link and run by full path: cmd may be told not to search the current directory
+rem (NoDefaultCurrentDirectoryInExePath), and this runner must not depend on that.
+set "EXE=%OUT%\selftest.exe"
+>> cl.rsp echo /Fe:"%EXE%"
 >> cl.rsp echo /link
 >> cl.rsp echo WindowsApp.lib
 
 cl "@%OUT%\cl.rsp"
-if errorlevel 1 (
+set "CLERR=%ERRORLEVEL%"
+if not "%CLERR%"=="0" (
+  popd
+  popd
+  exit /b %CLERR%
+)
+if not exist "%EXE%" (
+  echo Build reported success but "%EXE%" was not produced.
   popd
   popd
   exit /b 1
 )
-selftest.exe
+"%EXE%"
 set "TESTERR=%ERRORLEVEL%"
 popd
 popd

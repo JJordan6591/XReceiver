@@ -1,5 +1,12 @@
-# Visual Studio
+# Visual Studio IDE state. The ignore file itself stays tracked.
 .vs/
+*.suo
+*.VC.db
+*.VC.db-shm
+*.VC.db-wal
+*.opendb
+ipch/
+*.aps
 
 # Build output (solution and project intermediates)
 [Dd]ebug/
@@ -10,26 +17,44 @@ x86/
 [Aa][Rr][Mm]64/
 [Bb]in/
 [Oo]bj/
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.iobj
+*.ipdb
+*.tlog
+*.lastbuildstate
+*.exe
+*.lib
 
 # C++/WinRT and XAML generated output
 Generated Files/
 
 # Packaged app output
 AppPackages/
+BundleArtifacts/
+TestResults/
 *.appx
 *.appxbundle
 *.appxsym
 *.appxupload
 *.msix
 *.msixbundle
+*.nupkg
 
 # NuGet restore. packages.config stays tracked because it is not inside this directory.
 packages/
 
-# Machine-local settings, certificates, and private keys
+# Machine-local settings, certificates, and private keys.
+# *.user covers .vcxproj.user (remote machine address). Do not commit these.
 *.user
 *.pfx
 *.cer
+*.snk
+*.dmp
 
 # Temporary host self-test executables and logs, if created inside the tree
 selftest.exe

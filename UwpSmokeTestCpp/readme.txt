@@ -17,7 +17,14 @@ and plays audio through AudioGraph with its own small buffer.
 1. Build and deploy (Visual Studio 2022 only)
 ------------------------------------------------------------------------
 - Open UwpSmokeTestCpp.sln, pick Debug or Release, x64, "Remote Machine".
-  The remote Xbox address is already set in the .vcxproj.user file.
+  Set the Xbox address in the debugger settings. Visual Studio stores that
+  address in UwpSmokeTestCpp.vcxproj.user, which is not part of the
+  repository. Do not commit it.
+- Local packaging uses a development certificate. Visual Studio creates
+  UwpSmokeTestCpp_TemporaryKey.pfx on the first package build, or you can
+  choose one in the manifest designer under Packaging. That .pfx is a
+  private key and is gitignored. Do not commit .pfx, .cer, or .snk files.
+  Another machine creates its own test certificate the same way.
 - Build, deploy and debug from Visual Studio as usual. Take final latency
   numbers on Release x64; the Debug CRT slows the per-packet code.
 - On the Xbox, in Dev Home, set the app type to "Game" if the "App"

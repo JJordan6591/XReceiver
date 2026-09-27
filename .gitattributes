@@ -1,0 +1,6 @@
+# C++ and IDL source is UTF-8 text stored with LF.
+# Marking it text keeps a UTF-16 save from being stored and diffed as binary.
+# Other file types keep Git's automatic detection.
+*.h   text diff=cpp
+*.cpp text diff=cpp
+*.idl text

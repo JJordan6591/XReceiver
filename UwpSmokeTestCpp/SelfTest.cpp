@@ -2772,7 +2772,8 @@ namespace rx
             t.Check(SanitizeOverlay(0) == PlaybackOverlay::Automatic && SanitizeOverlay(1) == PlaybackOverlay::AlwaysVisible &&
                         SanitizeOverlay(2) == PlaybackOverlay::VideoOnly && SanitizeOverlay(99) == PlaybackOverlay::Automatic,
                     L"ui overlay: invalid values fall back to Automatic");
-            t.Check(std::wcscmp(AppDisplayName(), L"UwpSmokeTestCpp") == 0, L"ui title is centralized");
+            t.Check(std::wcscmp(AppDisplayName(), L"XReceiver") == 0 && wcsstr(AppDisplayName(), L"Smoke") == nullptr,
+                    L"ui title is XReceiver");
 
             ChromeInput healthy;
             healthy.overlay = PlaybackOverlay::VideoOnly;

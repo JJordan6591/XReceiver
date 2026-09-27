@@ -1,7 +1,7 @@
-﻿#pragma once
+#pragma once
 #include "App.xaml.g.h"
 
-namespace winrt::UwpSmokeTestCpp::implementation
+namespace winrt::XReceiver::implementation
 {
     struct App : AppT<App>
     {

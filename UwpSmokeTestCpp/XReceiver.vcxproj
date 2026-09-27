@@ -7,8 +7,10 @@
     <CppWinRTGenerateWindowsMetadata>true</CppWinRTGenerateWindowsMetadata>
     <MinimalCoreWin>true</MinimalCoreWin>
     <ProjectGuid>{ffdaf079-14ad-4ddb-a350-c221a3f679e5}</ProjectGuid>
-    <ProjectName>UwpSmokeTestCpp</ProjectName>
-    <RootNamespace>UwpSmokeTestCpp</RootNamespace>
+    <ProjectName>XReceiver</ProjectName>
+    <RootNamespace>XReceiver</RootNamespace>
+    <IntDir>$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <OutDir>$(SolutionDir)$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
     <DefaultLanguage>en-US</DefaultLanguage>
     <MinimumVisualStudioVersion>15.0</MinimumVisualStudioVersion>
     <AppContainerApplication>true</AppContainerApplication>

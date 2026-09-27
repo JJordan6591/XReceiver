@@ -1,7 +1,7 @@
-﻿<Application
-    x:Class="UwpSmokeTestCpp.App"
+<Application
+    x:Class="XReceiver.App"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:UwpSmokeTestCpp">
+    xmlns:local="using:XReceiver">
 
 </Application>

@@ -1,5 +1,5 @@
 ========================================================================
-    UwpSmokeTestCpp - low-latency RTP receiver for UxPlay (Xbox, UWP)
+    XReceiver - low-latency RTP receiver for UxPlay (Xbox, UWP)
 ========================================================================
 
 This app does NOT speak AirPlay. UxPlay on a Mac is the AirPlay receiver;
@@ -16,12 +16,12 @@ and plays audio through AudioGraph with its own small buffer.
 ------------------------------------------------------------------------
 1. Build and deploy (Visual Studio 2022 only)
 ------------------------------------------------------------------------
-- Open UwpSmokeTestCpp.sln, pick Debug or Release, x64, "Remote Machine".
+- Open XReceiver.sln, pick Debug or Release, x64, "Remote Machine".
   Set the Xbox address in the debugger settings. Visual Studio stores that
-  address in UwpSmokeTestCpp.vcxproj.user, which is not part of the
+  address in XReceiver.vcxproj.user, which is not part of the
   repository. Do not commit it.
 - Local packaging uses a development certificate. Visual Studio creates
-  UwpSmokeTestCpp_TemporaryKey.pfx on the first package build, or you can
+  XReceiver_TemporaryKey.pfx on the first package build, or you can
   choose one in the manifest designer under Packaging. That .pfx is a
   private key and is gitignored. Do not commit .pfx, .cer, or .snk files.
   Another machine creates its own test certificate the same way.

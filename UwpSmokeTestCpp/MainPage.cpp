@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "MainPage.h"
 #include "MainPage.g.cpp"
 
@@ -130,7 +130,7 @@ namespace
     }
 }
 
-namespace winrt::UwpSmokeTestCpp::implementation
+namespace winrt::XReceiver::implementation
 {
     rx::ChromeState ToChromeState(ConnectionState state);
     void MainPage::OnNavigatedTo(NavigationEventArgs const&)

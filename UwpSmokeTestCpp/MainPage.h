@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "MainPage.g.h"
 
@@ -18,7 +18,7 @@ namespace rx
 #endif
 }
 
-namespace winrt::UwpSmokeTestCpp::implementation
+namespace winrt::XReceiver::implementation
 {
     struct MainPage : MainPageT<MainPage>
     {
@@ -122,7 +122,7 @@ namespace winrt::UwpSmokeTestCpp::implementation
     };
 }
 
-namespace winrt::UwpSmokeTestCpp::factory_implementation
+namespace winrt::XReceiver::factory_implementation
 {
     struct MainPage : MainPageT<MainPage, implementation::MainPage>
     {

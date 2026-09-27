@@ -1,8 +1,8 @@
-﻿<Page
-    x:Class="UwpSmokeTestCpp.MainPage"
+<Page
+    x:Class="XReceiver.MainPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:local="using:UwpSmokeTestCpp"
+    xmlns:local="using:XReceiver"
     xmlns:automation="using:Windows.UI.Xaml.Automation"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -126,7 +126,7 @@
                         MaxHeight="720">
                     <ScrollViewer VerticalScrollBarVisibility="Auto">
                         <StackPanel>
-                            <TextBlock x:Name="FirstRunTitle" Text="UwpSmokeTestCpp" Style="{StaticResource SectionTitleText}" />
+                            <TextBlock x:Name="FirstRunTitle" Text="XReceiver" Style="{StaticResource SectionTitleText}" />
                             <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,10"
                                        Text="Put this Xbox and the UxPlay computer on the same local network. Video is UDP 5000. Audio is UDP 5002." />
                             <TextBlock Style="{StaticResource HelperText}" Margin="0,0,0,10"
